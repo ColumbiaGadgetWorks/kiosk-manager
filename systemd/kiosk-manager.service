@@ -1,0 +1,17 @@
+[Unit]
+Description=Kiosk Manager (kiosk browser, schedule and screen policy)
+Documentation=file://%h/.local/share/kiosk-manager/README.md
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=KIOSK_MANAGER_BIN=%h/.local/bin/kiosk-manager
+ExecStart=%h/.local/bin/kiosk-manager daemon
+Restart=always
+RestartSec=5
+# The daemon waits for the X display itself, so it is safe to start early.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=graphical-session.target default.target
