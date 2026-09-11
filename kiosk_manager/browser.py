@@ -7,7 +7,7 @@ import signal
 import subprocess
 import time
 
-from . import config
+from . import config, procs
 
 log = logging.getLogger("kiosk.browser")
 
@@ -163,9 +163,7 @@ class BrowserManager:
         env.setdefault("MOZ_ENABLE_WAYLAND", "0")
         log.info("launching: %s", " ".join(cmd))
         try:
-            self.proc = subprocess.Popen(
-                cmd, env=env, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True)
+            self.proc = procs.spawn(cmd, env=env, scope="kiosk-manager-browser")
         except OSError as exc:
             log.error("launch failed: %s", exc)
             return False, str(exc)

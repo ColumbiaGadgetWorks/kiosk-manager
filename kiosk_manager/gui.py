@@ -1,20 +1,23 @@
 """GTK configuration window for the kiosk daemon.
 
-Lives in the taskbar: closing the window only minimises it, so the operator can
-always get back to it (or press the configured hotkey, which runs
-`kiosk-manager show`).
+Lives in the taskbar behind the kiosk page: closing the window only minimises
+it, and the daemon restarts it if it dies. `kiosk-manager show` (bind it to a
+hotkey) brings it to the front.
 """
 
+import datetime
 import logging
+import os
 import shutil
 import subprocess
+import threading
 
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from . import config, ipc, scheduler  # noqa: E402
+from . import config, ipc, scheduler, version  # noqa: E402
 
 log = logging.getLogger("kiosk.gui")
 
@@ -33,10 +36,55 @@ list row { padding: 6px; }
 ON_SCREEN_KEYBOARDS = ["onboard", "matchbox-keyboard", "florence", "squeekboard"]
 
 
-def call(command, **kwargs):
+def call(command, timeout=5.0, **kwargs):
     payload = {"command": command}
     payload.update(kwargs)
-    return ipc.send(config.daemon_socket(), payload)
+    return ipc.send(config.daemon_socket(), payload, timeout=timeout)
+
+
+def when(timestamp):
+    if not timestamp:
+        return "never"
+    return datetime.datetime.fromtimestamp(timestamp).strftime("%a %d %b %H:%M")
+
+
+def time_spinners(text):
+    """Returns (row, hour_spin, minute_spin) for an HH:MM value."""
+    hour, minute = scheduler.parse_hhmm(text)
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    hour_spin = Gtk.SpinButton.new_with_range(0, 23, 1)
+    hour_spin.set_value(hour)
+    minute_spin = Gtk.SpinButton.new_with_range(0, 59, 5)
+    minute_spin.set_value(minute)
+    for spin in (hour_spin, minute_spin):
+        spin.set_orientation(Gtk.Orientation.VERTICAL)
+        spin.set_numeric(True)
+        spin.set_wrap(True)
+    row.pack_start(hour_spin, False, False, 0)
+    row.pack_start(Gtk.Label(label=":"), False, False, 0)
+    row.pack_start(minute_spin, False, False, 0)
+    return row, hour_spin, minute_spin
+
+
+def spin_time(hour_spin, minute_spin):
+    return "%02d:%02d" % (int(hour_spin.get_value()), int(minute_spin.get_value()))
+
+
+def day_toggles(selected):
+    """Returns (row, {day: ToggleButton}) for a set of weekdays."""
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+    row.set_homogeneous(True)
+    buttons = {}
+    for day in scheduler.DAYS:
+        button = Gtk.ToggleButton(label=scheduler.DAY_LABELS[day])
+        button.set_active(day in (selected or []))
+        buttons[day] = button
+        row.pack_start(button, True, True, 0)
+    return row, buttons
+
+
+def selected_days(buttons):
+    return [d for d in scheduler.DAYS if buttons[d].get_active()]
 
 
 class ScheduleDialog(Gtk.Dialog):
@@ -51,33 +99,14 @@ class ScheduleDialog(Gtk.Dialog):
         box.set_spacing(12)
         box.set_border_width(16)
 
-        hour, minute = scheduler.parse_hhmm(entry.get("time"))
-        time_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        time_row, self.hour, self.minute = time_spinners(entry.get("time"))
         time_row.pack_start(self._label("Time"), False, False, 0)
-        self.hour = Gtk.SpinButton.new_with_range(0, 23, 1)
-        self.hour.set_value(hour)
-        self.hour.set_orientation(Gtk.Orientation.VERTICAL)
-        self.minute = Gtk.SpinButton.new_with_range(0, 59, 5)
-        self.minute.set_value(minute)
-        self.minute.set_orientation(Gtk.Orientation.VERTICAL)
-        for widget in (self.hour, self.minute):
-            widget.set_numeric(True)
-            widget.set_wrap(True)
-        time_row.pack_start(self.hour, False, False, 0)
-        time_row.pack_start(Gtk.Label(label=":"), False, False, 0)
-        time_row.pack_start(self.minute, False, False, 0)
+        time_row.reorder_child(time_row.get_children()[-1], 0)
         box.add(time_row)
 
         box.add(self._label("Days"))
-        days_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        days_box.set_homogeneous(True)
-        self.day_buttons = {}
-        for day in scheduler.DAYS:
-            btn = Gtk.ToggleButton(label=scheduler.DAY_LABELS[day])
-            btn.set_active(day in (entry.get("days") or []))
-            self.day_buttons[day] = btn
-            days_box.pack_start(btn, True, True, 0)
-        box.add(days_box)
+        days_row, self.day_buttons = day_toggles(entry.get("days"))
+        box.add(days_row)
 
         self.wake = self._switch_row(box, "Wake the screen",
                                      entry.get("wake_screen", True))
@@ -107,9 +136,8 @@ class ScheduleDialog(Gtk.Dialog):
 
     def result(self):
         self.entry.update({
-            "time": "%02d:%02d" % (int(self.hour.get_value()),
-                                   int(self.minute.get_value())),
-            "days": [d for d in scheduler.DAYS if self.day_buttons[d].get_active()],
+            "time": spin_time(self.hour, self.minute),
+            "days": selected_days(self.day_buttons),
             "wake_screen": self.wake.get_active(),
             "open_browser": self.open_browser.get_active(),
             "return_to_home": self.return_home.get_active(),
@@ -121,7 +149,7 @@ class ScheduleDialog(Gtk.Dialog):
 class KioskWindow(Gtk.Window):
     def __init__(self, start_minimized=True):
         super().__init__(title="Kiosk Manager")
-        self.set_default_size(720, 620)
+        self.set_default_size(720, 680)
         self.set_icon_name("preferences-system")
         self.set_skip_taskbar_hint(False)
 
@@ -129,9 +157,12 @@ class KioskWindow(Gtk.Window):
         self._build()
         self.connect("delete-event", self._on_delete)
 
-        self.show_all()
         if start_minimized:
+            # Iconify before mapping so the window never flashes over the
+            # kiosk page, and do not steal focus from it.
+            self.set_focus_on_map(False)
             self.iconify()
+        self.show_all()
 
         GLib.timeout_add_seconds(3, self._refresh_status)
         self._refresh_status()
@@ -150,6 +181,13 @@ class KioskWindow(Gtk.Window):
             config.save(cfg)
             return False, reply.get("error", "daemon not reachable")
         return True, "saved"
+
+    def _call_async(self, command, done, timeout=300, **kwargs):
+        """Run a slow daemon call off the GTK thread; `done(reply)` runs on it."""
+        def worker():
+            reply = call(command, timeout=timeout, **kwargs)
+            GLib.idle_add(lambda: done(reply) and False)
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---- layout --------------------------------------------------------
     def _build(self):
@@ -173,10 +211,15 @@ class KioskWindow(Gtk.Window):
         notebook.set_margin_start(8)
         notebook.set_margin_end(8)
         outer.pack_start(notebook, True, True, 0)
-        notebook.append_page(self._page_website(), Gtk.Label(label="Website"))
-        notebook.append_page(self._page_schedule(), Gtk.Label(label="Schedule"))
-        notebook.append_page(self._page_screen(), Gtk.Label(label="Screen"))
-        notebook.append_page(self._page_status(), Gtk.Label(label="Status"))
+        for title, page in (("Website", self._page_website()),
+                            ("Schedule", self._page_schedule()),
+                            ("Screen", self._page_screen()),
+                            ("System", self._page_system()),
+                            ("Status", self._page_status())):
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroller.add(page)
+            notebook.append_page(scroller, Gtk.Label(label=title))
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         actions.set_border_width(10)
@@ -186,11 +229,12 @@ class KioskWindow(Gtk.Window):
         save.connect("clicked", self._on_save)
         revert = Gtk.Button(label="Revert")
         revert.connect("clicked", self._on_revert)
-        minimise = Gtk.Button(label="Minimise")
-        minimise.connect("clicked", lambda *_: self.iconify())
+        kiosk = Gtk.Button(label="Show kiosk page")
+        kiosk.get_style_context().add_class("big-button")
+        kiosk.connect("clicked", self._on_show_kiosk)
         actions.pack_start(save, True, True, 0)
         actions.pack_start(revert, False, False, 0)
-        actions.pack_start(minimise, False, False, 0)
+        actions.pack_start(kiosk, False, False, 0)
         outer.pack_start(actions, False, False, 0)
 
     def _page_website(self):
@@ -312,6 +356,58 @@ class KioskWindow(Gtk.Window):
             button.connect("clicked", lambda _b, c=command: self._command(c))
             row.pack_start(button, True, True, 0)
         box.add(row)
+        return box
+
+    def _page_system(self):
+        box = self._page_box()
+        gcfg = self.cfg.get("gui", {})
+        ucfg = self.cfg.get("update", {})
+
+        box.add(self._title("Settings window"))
+        self.keep_gui_switch = self._switch_row(
+            box, "Keep this window running: start it at boot and reopen it "
+                 "if it is closed",
+            gcfg.get("keep_running", True))
+        self.minimized_switch = self._switch_row(
+            box, "Start minimised in the taskbar",
+            gcfg.get("start_minimized", True))
+        box.add(self._hint("The window always opens behind the kiosk page. Bring "
+                           "it forward from the taskbar or with the "
+                           "kiosk-manager show hotkey."))
+
+        box.add(self._title("Automatic updates"))
+        self.update_switch = self._switch_row(
+            box, "Install updates automatically", ucfg.get("enabled", False))
+
+        time_row, self.update_hour, self.update_minute = time_spinners(
+            ucfg.get("time", "03:00"))
+        box.add(self._field_row("Check and install at", time_row))
+        days_row, self.update_days = day_toggles(ucfg.get("days", scheduler.DAYS))
+        box.add(days_row)
+
+        self.repo_entry = Gtk.Entry()
+        self.repo_entry.set_text(ucfg.get("repo", ""))
+        box.add(self._field_row("Repository", self.repo_entry))
+        self.branch_entry = Gtk.Entry()
+        self.branch_entry.set_text(ucfg.get("branch", "main"))
+        box.add(self._field_row("Branch", self.branch_entry))
+
+        self.update_label = Gtk.Label(xalign=0)
+        self.update_label.set_selectable(True)
+        self.update_label.set_line_wrap(True)
+        box.add(self.update_label)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.check_button = Gtk.Button(label="Check for updates")
+        self.check_button.connect("clicked", self._on_check_update)
+        self.update_button = Gtk.Button(label="Update now")
+        self.update_button.connect("clicked", self._on_update_now)
+        row.pack_start(self.check_button, True, True, 0)
+        row.pack_start(self.update_button, True, True, 0)
+        box.add(row)
+        box.add(self._hint("An update restarts only the background service. The "
+                           "kiosk page stays on screen; this window reopens on "
+                           "the new version by itself."))
         return box
 
     def _page_status(self):
@@ -454,6 +550,15 @@ class KioskWindow(Gtk.Window):
         self._reload_schedule_rows()
 
     # ---- actions -------------------------------------------------------
+    def _collect_update(self):
+        return {
+            "enabled": self.update_switch.get_active(),
+            "time": spin_time(self.update_hour, self.update_minute),
+            "days": selected_days(self.update_days),
+            "repo": self.repo_entry.get_text().strip(),
+            "branch": self.branch_entry.get_text().strip() or "main",
+        }
+
     def _collect(self):
         cfg = self.cfg
         cfg["url"] = self.url_entry.get_text().strip()
@@ -476,6 +581,11 @@ class KioskWindow(Gtk.Window):
             "dpms_off_after_minutes": int(self.dpms_spin.get_value()),
             "disable_lock": self.lock_switch.get_active(),
         })
+        cfg.setdefault("gui", {}).update({
+            "keep_running": self.keep_gui_switch.get_active(),
+            "start_minimized": self.minimized_switch.get_active(),
+        })
+        cfg.setdefault("update", {}).update(self._collect_update())
         return cfg
 
     def _on_save(self, *_args):
@@ -497,6 +607,8 @@ class KioskWindow(Gtk.Window):
         bcfg = cfg.get("browser", {})
         boot = cfg.get("boot", {})
         scfg = cfg.get("screen", {})
+        gcfg = cfg.get("gui", {})
+        ucfg = cfg.get("update", {})
         self.url_entry.set_text(cfg.get("url", ""))
         self.cmd_entry.set_text(bcfg.get("command", "/usr/bin/firefox"))
         self.extra_entry.set_text(" ".join(bcfg.get("extra_args") or []))
@@ -511,11 +623,63 @@ class KioskWindow(Gtk.Window):
         self.blank_spin.set_value(scfg.get("blank_after_minutes", 0))
         self.dpms_spin.set_value(scfg.get("dpms_off_after_minutes", 0))
         self.lock_switch.set_active(scfg.get("disable_lock", True))
+        self.keep_gui_switch.set_active(gcfg.get("keep_running", True))
+        self.minimized_switch.set_active(gcfg.get("start_minimized", True))
+        self.update_switch.set_active(ucfg.get("enabled", False))
+        hour, minute = scheduler.parse_hhmm(ucfg.get("time", "03:00"))
+        self.update_hour.set_value(hour)
+        self.update_minute.set_value(minute)
+        for day, button in self.update_days.items():
+            button.set_active(day in ucfg.get("days", scheduler.DAYS))
+        self.repo_entry.set_text(ucfg.get("repo", ""))
+        self.branch_entry.set_text(ucfg.get("branch", "main"))
         self._reload_schedule_rows()
         self._flash("Reloaded the saved settings", ok=True)
 
+    def _on_show_kiosk(self, *_args):
+        self.iconify()
+        reply = call("open", timeout=30, return_to_home=False)
+        if not reply.get("ok"):
+            self.present_window()
+            self._flash("Could not show the kiosk page: %s"
+                        % reply.get("error", "?"), ok=False)
+
+    def _set_update_buttons(self, sensitive):
+        self.check_button.set_sensitive(sensitive)
+        self.update_button.set_sensitive(sensitive)
+
+    def _on_check_update(self, *_args):
+        self._set_update_buttons(False)
+        self._flash("Checking for updates...", ok=True)
+
+        def done(reply):
+            self._set_update_buttons(True)
+            if reply.get("ok"):
+                self._flash("Update check: %s" % reply.get("result"), ok=True)
+            else:
+                self._flash("Update check failed: %s" % reply.get("error"), ok=False)
+            self._refresh_status()
+
+        self._call_async("update_check", done, timeout=120,
+                         update=self._collect_update())
+
+    def _on_update_now(self, *_args):
+        self._set_update_buttons(False)
+        self._flash("Downloading the update...", ok=True)
+
+        def done(reply):
+            self._set_update_buttons(True)
+            if reply.get("ok"):
+                self._flash("Update: %s" % reply.get("result"), ok=True)
+            else:
+                self._flash("Update failed: %s" % reply.get("error"), ok=False)
+            self._refresh_status()
+
+        self._call_async("update_now", done, timeout=600,
+                         update=self._collect_update())
+
     def _command(self, command):
-        reply = call(command)
+        reply = call(command, timeout=30)
         if reply.get("ok"):
             self._flash("%s: done" % command.replace("_", " "), ok=True)
         else:
@@ -536,13 +700,15 @@ class KioskWindow(Gtk.Window):
             self.status_label.set_markup(
                 "<b>Daemon is not running.</b>\n"
                 "Start it with:  systemctl --user start kiosk-manager.service")
+            self.update_label.set_text("Installed: %s" % version.describe(
+                version.installed_commit()))
             return True
         browser_info = reply.get("browser", {})
         daemon_info = reply.get("daemon", {})
         screen_info = reply.get("screen", {})
         lines = [
-            "Daemon: running (pid %s, up %s)" % (
-                daemon_info.get("pid"),
+            "Daemon: running %s (pid %s, up %s)" % (
+                daemon_info.get("version", ""), daemon_info.get("pid"),
                 self._duration(daemon_info.get("uptime_seconds", 0))),
             "Kiosk page: %s" % (browser_info.get("url") or "(not set)"),
             "Browser: %s" % ("running (pid %s)" % ", ".join(
@@ -558,7 +724,29 @@ class KioskWindow(Gtk.Window):
             "Last action: %s" % daemon_info.get("last_event", ""),
         ]
         self.status_label.set_text("\n".join(lines))
+        self._render_update_status(reply.get("update") or {})
         return True
+
+    def _render_update_status(self, info):
+        def outcome(record):
+            if not record:
+                return "never"
+            return "%s (%s)" % (record.get("message", ""), when(record.get("at")))
+
+        latest = info.get("latest")
+        lines = [
+            "Installed: %s" % version.describe(info.get("installed") or ""),
+            "Latest on %s: %s" % (self.branch_entry.get_text().strip() or "main",
+                                  latest[:7] if latest else "not checked yet"),
+            "Last check: %s" % outcome(info.get("last_check")),
+            "Last update: %s" % outcome(info.get("last_update")),
+            "Next automatic update: %s" % (info.get("next_run") or "off"),
+        ]
+        if info.get("pending"):
+            lines.append("Installing %s now..." % info["pending"][:7])
+        if not info.get("git_available", True):
+            lines.append("git is not installed: sudo apt-get install git")
+        self.update_label.set_text("\n".join(lines))
 
     @staticmethod
     def _duration(seconds):
@@ -575,20 +763,34 @@ class KioskWindow(Gtk.Window):
         return True
 
     def present_window(self):
+        self.set_focus_on_map(True)
         self.deiconify()
         self.present()
         return False
 
 
 def main(start_minimized=True):
+    existing = ipc.send(config.gui_socket(), {"command": "ping"}, timeout=2.0)
+    if existing.get("ok"):
+        # Single instance: hand the request to the window that is already up.
+        if not start_minimized:
+            ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0)
+        log.info("settings window already running")
+        return 0
+
     window = KioskWindow(start_minimized=start_minimized)
 
     def handler(request):
-        if (request or {}).get("command") == "show":
+        command = (request or {}).get("command")
+        if command == "show":
             GLib.idle_add(window.present_window)
             return {"ok": True}
-        if (request or {}).get("command") == "ping":
-            return {"ok": True, "pong": True}
+        if command == "ping":
+            return {"ok": True, "pong": True, "pid": os.getpid(),
+                    "version": version.RUNNING_COMMIT}
+        if command == "quit":
+            GLib.idle_add(Gtk.main_quit)
+            return {"ok": True}
         return {"ok": False, "error": "unknown command"}
 
     server = ipc.Server(config.gui_socket(), handler)

@@ -64,6 +64,15 @@ DEFAULTS = {
     },
     "gui": {
         "start_minimized": True,
+        # Daemon starts the settings window at boot and restarts it if it dies.
+        "keep_running": True,
+    },
+    "update": {
+        "enabled": False,
+        "time": "03:00",
+        "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        "repo": "https://github.com/ColumbiaGadgetWorks/kiosk-manager.git",
+        "branch": "main",
     },
 }
 

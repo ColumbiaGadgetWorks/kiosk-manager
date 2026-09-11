@@ -12,6 +12,11 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kiosk-manager"
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
 
+# The kiosk browser and settings window run in their own systemd scopes, so
+# stopping the service alone would leave them on screen.
+"$BIN" stop >/dev/null 2>&1 || true
+pkill -f "kiosk_manager gui" 2>/dev/null || true
+
 systemctl --user disable --now kiosk-manager.service 2>/dev/null || true
 rm -f "$UNIT_DIR/kiosk-manager.service"
 rm -f "$UNIT_DIR"/graphical-session.target.wants/kiosk-manager.service

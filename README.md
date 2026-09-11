@@ -13,8 +13,11 @@ What it does:
   raised and optionally sent back to the home URL).
 * Sets the session screen blanking and panel power off timeouts, and can
   disable the lock screen and screensaver.
-* Runs headless as a systemd user service. The settings window lives in the
-  taskbar, starts minimised, and closing it just minimises it again.
+* Runs headless as a systemd user service. The service also keeps the settings
+  window running: it starts it at boot behind the kiosk page, reopens it if it
+  dies, and closing it only minimises it to the taskbar.
+* Updates itself from this GitHub repository at a time and on days you pick,
+  without taking the kiosk page off the screen.
 
 ## Install
 
@@ -27,7 +30,8 @@ cd ~/kiosk-manager && ./install.sh --install-deps
 Options:
 
 * `--install-deps` runs `apt-get install` for the required packages
-  (`python3-gi`, `gir1.2-gtk-3.0`, `x11-xserver-utils`, `xdotool`, `wmctrl`).
+  (`python3-gi`, `gir1.2-gtk-3.0`, `x11-xserver-utils`, `xdotool`, `wmctrl`,
+  and `git` for automatic updates).
   Leave it off if they are already installed.
 * `--url https://status.example.com/` sets the kiosk page explicitly. Without
   it, the installer reads the URL out of the old `scripts/startup.sh`.
@@ -41,8 +45,13 @@ By default the installer:
 2. Installs the code to `~/.local/lib/kiosk-manager` and a launcher at
    `~/.local/bin/kiosk-manager`.
 3. Installs `~/.config/systemd/user/kiosk-manager.service` and enables it.
-4. Installs an autostart entry so the settings window is in the taskbar after
-   login, and a menu entry under Settings.
+4. Installs a menu entry under Settings. There is no login autostart entry:
+   the service starts the settings window itself (and removes the autostart
+   entry version 1.0 created).
+
+Install from a git clone so the installed build has a commit id to compare
+against when checking for updates. A tarball install works too; its first
+automatic update simply reinstalls the current branch head.
 
 If the kiosk boots straight into a session with no interactive login, run once:
 
@@ -52,7 +61,7 @@ sudo loginctl enable-linger kiosk
 
 ## Daily use
 
-The settings window has four tabs.
+The settings window has five tabs.
 
 * **Website**: kiosk URL, Firefox executable and flags, kiosk / private window
   toggles, launch on boot, boot delay, and whether to reopen the browser
@@ -63,6 +72,10 @@ The settings window has four tabs.
 * **Screen**: blank after N minutes, power the panel off after N minutes
   (0 means never for both), disable the lock screen, plus buttons to wake,
   blank or re-apply the settings right now.
+* **System**: whether the service keeps this window running (starts it at
+  boot and reopens it if it closes), whether it starts minimised, and the
+  automatic update switch, time, days, repository and branch, with
+  **Check for updates** and **Update now** buttons.
 * **Status**: what the daemon and browser are doing, the next scheduled event,
   and buttons to open, restart or close the browser.
 
@@ -81,7 +94,8 @@ ways back:
 * Close the browser first (`kiosk-manager stop`), then use the taskbar.
 
 `kiosk-manager show` raises the window if it is already running, and starts it
-if it is not.
+if it is not. The **Show kiosk page** button at the bottom of the window
+minimises it and brings the kiosk page back to the front.
 
 ## Command line
 
@@ -97,6 +111,9 @@ kiosk-manager wake           # wake the screen now
 kiosk-manager blank          # blank the screen now
 kiosk-manager set-url URL    # change the kiosk page
 kiosk-manager config-path    # print the config file location
+kiosk-manager version        # print the installed version and commit
+kiosk-manager update-check   # ask GitHub whether a newer build exists
+kiosk-manager update         # install it now (restarts the service only)
 ```
 
 Service control and logs:
@@ -148,7 +165,17 @@ and can be edited by hand; run `kiosk-manager reload` afterwards.
     "dpms_off_after_minutes": 0,
     "disable_lock": true
   },
-  "gui": { "start_minimized": true }
+  "gui": {
+    "start_minimized": true,
+    "keep_running": true
+  },
+  "update": {
+    "enabled": false,
+    "time": "03:00",
+    "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+    "repo": "https://github.com/ColumbiaGadgetWorks/kiosk-manager.git",
+    "branch": "main"
+  }
 }
 ```
 
@@ -171,6 +198,26 @@ and can be edited by hand; run `kiosk-manager reload` afterwards.
   running, it is relaunched after `restart_grace_seconds`. Closing it from the
   GUI or with `kiosk-manager stop` suppresses that until the next explicit
   open, so the desktop stays reachable for maintenance.
+* **Settings window keeper**: with `gui.keep_running` on, the service starts
+  the window minimised once the display is up, before the kiosk page, so the
+  page ends up in front. It pings the window every few seconds and restarts it
+  if it has gone, backing off from 30 seconds to 10 minutes if it keeps dying.
+  After an update it restarts a window still running the old build.
+* **Own scopes**: the browser and the settings window are started with
+  `systemd-run --user --scope`, so restarting `kiosk-manager.service` (which
+  an update does) leaves both on screen. A service restart more than 10
+  minutes after boot also skips the screen wake and the boot delay.
+* **Updates**: at the configured time the service runs `git ls-remote` against
+  the repository. If the branch head differs from the installed commit
+  (`~/.local/lib/kiosk-manager/VERSION`) it fetches the branch into
+  `~/.local/share/kiosk-manager/src` and runs that copy's
+  `install.sh --update` as a separate transient job. That copies the files,
+  keeps your config, and restarts the service. The restarted service reports
+  whether the new commit landed; output goes to
+  `~/.local/share/kiosk-manager/update.log`.
+  Anyone who can push to the branch can change what runs on the kiosk, so
+  keep push access to the repository limited, or point `update.branch` at a
+  branch you only merge tested changes into.
 
 ## Uninstall
 
@@ -193,5 +240,7 @@ folder the installer created if you want to go back.
   every launch, so put lasting tweaks in the GUI or the config file rather than
   there. Turn off "Use the dedicated kiosk Firefox profile" to use the default
   profile instead.
-* Verified: Python syntax and the CLI wiring. Not verified: the GTK window and
+* Verified: Python syntax, the scheduler, the settings window keeper logic,
+  the updater against a local git repository, and the CLI wiring. Not
+  verified: the GTK window, systemd scopes, and
   the X11 calls, which need the kiosk machine itself.

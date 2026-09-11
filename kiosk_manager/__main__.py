@@ -4,11 +4,10 @@ import argparse
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 
-from . import config, ipc
+from . import config, ipc, procs, version
 
 COMMANDS = {
     "status": "status",
@@ -19,7 +18,13 @@ COMMANDS = {
     "blank": "blank",
     "apply-screen": "apply_screen",
     "reload": "reload",
+    "update-check": "update_check",
+    "update": "update_now",
 }
+
+# Commands that touch the network or restart the browser need longer.
+SLOW_COMMANDS = {"update_check": 120, "update_now": 600, "restart_browser": 30,
+                 "stop_browser": 30, "open": 30}
 
 
 def setup_logging(verbose=False, to_file=False):
@@ -37,7 +42,8 @@ def setup_logging(verbose=False, to_file=False):
 def daemon_call(command, **kwargs):
     payload = {"command": command}
     payload.update(kwargs)
-    return ipc.send(config.daemon_socket(), payload)
+    return ipc.send(config.daemon_socket(), payload,
+                    timeout=SLOW_COMMANDS.get(command, 5.0))
 
 
 def cmd_show():
@@ -45,12 +51,8 @@ def cmd_show():
     reply = ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0)
     if reply.get("ok"):
         return 0
-    exe = os.environ.get("KIOSK_MANAGER_BIN") or shutil.which("kiosk-manager")
-    if exe:
-        subprocess.Popen([exe, "gui", "--no-minimize"], start_new_session=True)
-    else:
-        subprocess.Popen([sys.executable, "-m", "kiosk_manager", "gui",
-                          "--no-minimize"], start_new_session=True)
+    subprocess.Popen(procs.self_command("gui", "--no-minimize"),
+                     start_new_session=True)
     return 0
 
 
@@ -71,6 +73,7 @@ def main(argv=None):
     url_parser = sub.add_parser("set-url", help="change the kiosk page")
     url_parser.add_argument("url")
     sub.add_parser("config-path", help="print the config file location")
+    sub.add_parser("version", help="print the installed version")
 
     args = parser.parse_args(argv)
     cmd = args.cmd or "gui"
@@ -94,6 +97,10 @@ def main(argv=None):
 
     if cmd == "config-path":
         print(config.CONFIG_PATH)
+        return 0
+
+    if cmd == "version":
+        print(version.describe(version.installed_commit()))
         return 0
 
     if cmd == "set-url":

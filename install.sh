@@ -17,6 +17,7 @@ BACKUP_DIR="$HOME/kiosk-manager-backup-$(date +%Y%m%d-%H%M%S)"
 URL_OVERRIDE=""
 DO_MIGRATE=1
 INSTALL_DEPS=0
+UPDATE_MODE=0
 
 usage() {
     cat <<USAGE
@@ -26,6 +27,7 @@ Usage: ./install.sh [options]
                    startup.sh if present, otherwise left as-is)
   --no-migrate     do not touch the existing kiosk-browser units / startup.sh
   --install-deps   apt-get install the required packages (uses sudo)
+  --update         non-interactive upgrade, used by the auto-updater
   -h, --help       show this help
 USAGE
 }
@@ -35,6 +37,7 @@ while [ $# -gt 0 ]; do
         --url) URL_OVERRIDE="${2:-}"; shift 2 ;;
         --no-migrate) DO_MIGRATE=0; shift ;;
         --install-deps) INSTALL_DEPS=1; shift ;;
+        --update) UPDATE_MODE=1; DO_MIGRATE=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage; exit 1 ;;
     esac
@@ -48,7 +51,7 @@ fi
 say() { printf '\n== %s\n' "$*"; }
 
 # --------------------------------------------------------------- dependencies
-PACKAGES="python3 python3-gi gir1.2-gtk-3.0 x11-xserver-utils xdotool wmctrl firefox-esr"
+PACKAGES="python3 python3-gi gir1.2-gtk-3.0 x11-xserver-utils xdotool wmctrl git firefox-esr"
 if [ "$INSTALL_DEPS" = "1" ]; then
     say "Installing packages"
     sudo apt-get update
@@ -63,7 +66,9 @@ fi
 say "Checking dependencies"
 MISSING=""
 command -v python3 >/dev/null 2>&1 || MISSING="$MISSING python3"
-python3 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk" \
+# require_version only checks the typelib, so this works without a display
+# (the auto-updater runs this script from a background job).
+python3 -c "import gi; gi.require_version('Gtk','3.0')" \
     >/dev/null 2>&1 || MISSING="$MISSING python3-gi/gir1.2-gtk-3.0"
 command -v xset >/dev/null 2>&1 || MISSING="$MISSING x11-xserver-utils"
 command -v xdotool >/dev/null 2>&1 || MISSING="$MISSING xdotool"
@@ -76,6 +81,8 @@ if [ -n "$MISSING" ]; then
     exit 1
 fi
 echo "All present."
+command -v git >/dev/null 2>&1 || \
+    echo "Note: git is not installed; automatic updates need it (sudo apt-get install git)."
 
 FIREFOX="$(command -v firefox || command -v firefox-esr || echo /usr/bin/firefox)"
 
@@ -110,12 +117,19 @@ fi
 
 # --------------------------------------------------------------------- install
 say "Installing to $LIB_DIR"
-mkdir -p "$LIB_DIR" "$BIN_DIR" "$UNIT_DIR" "$AUTOSTART_DIR" "$APPS_DIR" \
-         "$DATA_DIR" "$CONFIG_DIR"
+mkdir -p "$LIB_DIR" "$BIN_DIR" "$UNIT_DIR" "$APPS_DIR" "$DATA_DIR" "$CONFIG_DIR"
 rm -rf "$LIB_DIR/kiosk_manager"
 cp -r "$SRC_DIR/kiosk_manager" "$LIB_DIR/"
 cp "$SRC_DIR/README.md" "$DATA_DIR/README.md" 2>/dev/null || true
 find "$LIB_DIR" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+# The updater compares this commit with the branch head on GitHub.
+if git -C "$SRC_DIR" rev-parse HEAD >"$LIB_DIR/VERSION" 2>/dev/null; then
+    echo "version: $(cut -c1-7 "$LIB_DIR/VERSION")"
+else
+    rm -f "$LIB_DIR/VERSION"
+    echo "version: unknown (not installed from a git checkout)"
+fi
 
 cat > "$BIN" <<LAUNCHER
 #!/bin/sh
@@ -131,8 +145,11 @@ echo "launcher: $BIN"
 
 sed "s|Exec=kiosk-manager gui|Exec=$BIN gui|" \
     "$SRC_DIR/desktop/kiosk-manager.desktop" > "$APPS_DIR/kiosk-manager.desktop"
-cp "$APPS_DIR/kiosk-manager.desktop" "$AUTOSTART_DIR/kiosk-manager.desktop"
-echo "desktop entry + autostart installed"
+# The service starts the settings window itself now ("Keep this window
+# running" on the System tab), so drop the login autostart entry that
+# version 1.0 installed.
+rm -f "$AUTOSTART_DIR/kiosk-manager.desktop"
+echo "menu entry installed"
 
 sed "s|%h/.local/bin/kiosk-manager|$BIN|g" \
     "$SRC_DIR/systemd/kiosk-manager.service" > "$UNIT_DIR/kiosk-manager.service"
@@ -171,7 +188,14 @@ fi
 # ---------------------------------------------------------------------- enable
 say "Enabling the service"
 systemctl --user daemon-reload
-systemctl --user enable --now kiosk-manager.service
+systemctl --user enable kiosk-manager.service
+# restart rather than start, so a reinstall or an update runs the new code.
+# The kiosk browser and settings window live in their own scopes and survive.
+systemctl --user restart kiosk-manager.service
+if [ "$UPDATE_MODE" = "1" ]; then
+    echo "update installed: $(cat "$LIB_DIR/VERSION" 2>/dev/null || echo unknown)"
+    exit 0
+fi
 sleep 2
 systemctl --user --no-pager --lines=5 status kiosk-manager.service || true
 
@@ -190,6 +214,7 @@ Configure it:      $BIN gui
 Raise the window:  $BIN show    (bind this to a hotkey, e.g. Ctrl+Alt+K)
 Service control:   systemctl --user status|restart kiosk-manager.service
 Live log:          journalctl --user -u kiosk-manager.service -f
+Updates:           $BIN update-check   /   $BIN update
 Config file:       $CONFIG_FILE
 DONE
 if [ "$DO_MIGRATE" = "1" ] && [ -d "$BACKUP_DIR" ]; then
