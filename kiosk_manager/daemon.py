@@ -118,8 +118,10 @@ class Daemon:
                 screen.wake()
                 result = self.browser.ensure_open(return_to_home=True)
             elif self.browser.is_running():
-                # Restarted underneath a live kiosk (after an update): hands off.
-                result = "already running, left untouched"
+                # Restarted underneath a live kiosk (after an update): leave it
+                # alone unless the configured URL changed since it launched.
+                result = ("restarted on the new URL" if self.sync_browser_url()
+                          else "already running, left untouched")
             else:
                 result = self.browser.ensure_open(return_to_home=False)
         self.note("%s launch: %s" % ("boot" if is_boot else "restart", result))
@@ -261,11 +263,26 @@ class Daemon:
         return ucfg
 
     # ---- config --------------------------------------------------------
+    def sync_browser_url(self):
+        """Restart the kiosk browser if it is showing a superseded URL.
+
+        Firefox only reads the URL (and the home page in user.js) at launch,
+        so without this a new URL would not appear until the next reboot.
+        """
+        running = self.browser.running_url()
+        wanted = self.cfg.get("url", "")
+        if not running or not wanted or running == wanted:
+            return False
+        ok, msg = self.browser.restart()
+        self.note("kiosk URL changed, browser restarted: %s" % msg)
+        return ok
+
     def reload_config(self):
         with self.lock:
             self.cfg = config.load()
             self.browser.update_config(self.cfg)
             self.apply_screen()
+            self.sync_browser_url()
         self.note("config reloaded")
         return self.cfg
 
@@ -275,6 +292,7 @@ class Daemon:
             self.cfg = config.load()
             self.browser.update_config(self.cfg)
             self.apply_screen()
+            self.sync_browser_url()
         self.note("config updated from GUI")
         return self.cfg
 

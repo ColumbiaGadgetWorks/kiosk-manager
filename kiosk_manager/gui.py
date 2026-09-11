@@ -175,7 +175,8 @@ class KioskWindow(Gtk.Window):
         return config.load()
 
     def _push_config(self, cfg):
-        reply = call("set_config", config=cfg)
+        # Saving a new URL restarts the browser, which can take several seconds.
+        reply = call("set_config", timeout=30, config=cfg)
         if not reply.get("ok"):
             # Daemon down: still persist, it picks the file up when it starts.
             config.save(cfg)

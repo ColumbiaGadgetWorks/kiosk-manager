@@ -36,8 +36,19 @@ def gui_socket():
     return os.path.join(runtime_dir(), "gui.sock")
 
 
+DEFAULT_URL = "https://fundbot.adman.casa/?kiosk"
+
+# URLs older installs wrote (the old startup.sh page, or the installer
+# placeholder). They are upgraded to DEFAULT_URL so the fundbot sheet shows its
+# kiosk layout; any other URL is left exactly as configured.
+LEGACY_URLS = {
+    "https://fundbot.adman.casa/",
+    "https://fundbot.adman.casa",
+    "https://example.com/",
+}
+
 DEFAULTS = {
-    "url": "https://example.com/",
+    "url": DEFAULT_URL,
     "browser": {
         "command": "/usr/bin/firefox",
         "kiosk": True,
@@ -108,6 +119,8 @@ def load():
     except (OSError, ValueError):
         raw = {}
     cfg = _merge(DEFAULTS, raw)
+    if str(cfg.get("url", "")).strip() in LEGACY_URLS:
+        cfg["url"] = DEFAULT_URL
     # Repair schedule entries so a hand-edited file can't crash the daemon.
     fixed = []
     for entry in cfg.get("schedule", {}).get("entries", []) or []:

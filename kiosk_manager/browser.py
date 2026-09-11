@@ -120,6 +120,19 @@ class BrowserManager:
                 return ids[-1]
         return None
 
+    def running_url(self):
+        """The URL the running kiosk instance was launched with, if readable."""
+        for pid in self._find_pids():
+            try:
+                with open("/proc/%d/cmdline" % pid, "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue
+            args = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+            if MARKER in args:
+                return args[-1]
+        return None
+
     def _use_profile(self):
         return bool(self.cfg.get("browser", {}).get("use_managed_profile", True))
 

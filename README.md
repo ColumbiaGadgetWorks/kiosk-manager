@@ -34,7 +34,8 @@ Options:
   and `git` for automatic updates).
   Leave it off if they are already installed.
 * `--url https://status.example.com/` sets the kiosk page explicitly. Without
-  it, the installer reads the URL out of the old `scripts/startup.sh`.
+  it, the installer uses the URL from the old `scripts/startup.sh`, or the
+  default `https://fundbot.adman.casa/?kiosk`.
 * `--no-migrate` leaves the existing kiosk-browser units and `startup.sh` alone.
 
 By default the installer:
@@ -80,7 +81,21 @@ The settings window has five tabs.
   and buttons to open, restart or close the browser.
 
 Press **Save settings** to write the config and apply it immediately. No
-reboot or service restart is needed.
+reboot or service restart is needed. Changing the URL restarts the browser on
+the new page.
+
+## The fundbot kiosk layout
+
+The default page is `https://fundbot.adman.casa/?kiosk`. The `?kiosk`
+parameter tells the fundbot sheet it is on the shop touchscreen: it hides the
+Donate button (which would open the payment page in a tab the kiosk cannot
+leave) and shows a larger QR code instead. Everyone else visiting the sheet
+without the parameter still gets the button.
+
+Configs that still hold the bare `https://fundbot.adman.casa/` from the old
+`startup.sh` are upgraded to the `?kiosk` URL automatically, and a running
+browser is restarted onto it. To show the normal layout on the kiosk, set the
+URL to `https://fundbot.adman.casa/?kiosk=0`.
 
 ## Getting back to the window
 
@@ -131,7 +146,7 @@ and can be edited by hand; run `kiosk-manager reload` afterwards.
 
 ```json
 {
-  "url": "https://status.example.com/",
+  "url": "https://fundbot.adman.casa/?kiosk",
   "browser": {
     "command": "/usr/bin/firefox",
     "kiosk": true,
