@@ -97,6 +97,29 @@ Configs that still hold the bare `https://fundbot.adman.casa/` from the old
 browser is restarted onto it. To show the normal layout on the kiosk, set the
 URL to `https://fundbot.adman.casa/?kiosk=0`.
 
+### The Open GUI button
+
+In kiosk mode that sheet shows an **Open GUI** button, which is a link to
+`kioskmgr://show`. It is the touchscreen equivalent of the hotkey: no keyboard
+needed to reach the settings window. Two pieces make it work, both set up by
+the installer:
+
+* `~/.local/share/applications/kiosk-manager-url.desktop` registers this app as
+  the handler for `kioskmgr://`, running `kiosk-manager show`.
+* `handlers.json` in the kiosk Firefox profile, rewritten at every launch, tells
+  Firefox to hand that scheme to the system handler without asking first.
+
+To test it by hand:
+
+```bash
+xdg-open kioskmgr://show
+```
+
+If that raises the window but the button in the page does nothing, Firefox is
+not honouring the preloaded handler. Check that
+`~/.local/share/kiosk-manager/firefox-profile/handlers.json` exists after a
+launch, then restart the browser from the Status tab.
+
 ## Getting back to the window
 
 Kiosk mode is fullscreen, so the taskbar is covered while the page is up. Two

@@ -67,7 +67,9 @@ def main(argv=None):
     gui_parser = sub.add_parser("gui", help="run the configuration window")
     gui_parser.add_argument("--no-minimize", action="store_true",
                             help="open the window instead of starting minimised")
-    sub.add_parser("show", help="raise the configuration window")
+    show_parser = sub.add_parser("show", help="raise the configuration window")
+    # Tolerate a kioskmgr:// URL if a desktop handler passes one through.
+    show_parser.add_argument("url", nargs="?", help=argparse.SUPPRESS)
     for name in COMMANDS:
         sub.add_parser(name, help="send the %s command to the daemon" % name)
     url_parser = sub.add_parser("set-url", help="change the kiosk page")

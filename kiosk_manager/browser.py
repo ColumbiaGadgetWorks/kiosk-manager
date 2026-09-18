@@ -1,5 +1,7 @@
 """Launching, inspecting and steering the kiosk Firefox instance."""
 
+import copy
+import json
 import logging
 import os
 import shutil
@@ -38,7 +40,24 @@ user_pref("apz.overscroll.enabled", true);
 user_pref("general.smoothScroll", true);
 user_pref("signon.rememberSignons", false);
 user_pref("browser.download.useDownloadDir", true);
+user_pref("network.protocol-handler.external.kioskmgr", true);
+user_pref("network.protocol-handler.warn-external.kioskmgr", false);
+user_pref("network.protocol-handler.expose.kioskmgr", false);
 """
+
+# The kiosk page links to kioskmgr://show to raise the settings window. The
+# installer registers a .desktop handler for the scheme; this preloads Firefox
+# to hand it straight to that handler instead of asking which app to use.
+HANDLERS_JSON = {
+    "defaultHandlersVersion": {"en-US": 4},
+    "schemes": {
+        "kioskmgr": {
+            "action": 4,  # nsIHandlerInfo.useSystemDefault
+            "ask": False,
+            "handlers": [{"name": "Kiosk Manager"}],
+        }
+    },
+}
 
 
 def _has(cmd):
@@ -72,6 +91,11 @@ class BrowserManager:
         url = self.cfg.get("url", "").strip().replace(chr(34), "%22")
         with open(os.path.join(path, "user.js"), "w", encoding="utf-8") as fh:
             fh.write(USER_JS_TEMPLATE.format(url=url))
+        handlers = copy.deepcopy(HANDLERS_JSON)
+        handlers["schemes"]["kioskmgr"]["handlers"] = [
+            {"name": "Kiosk Manager", "path": procs.self_command()[0]}]
+        with open(os.path.join(path, "handlers.json"), "w", encoding="utf-8") as fh:
+            json.dump(handlers, fh)
         # Stop Firefox nagging about a profile that was not shut down cleanly.
         for name in ("sessionstore.jsonlz4", "sessionstore-backups"):
             target = os.path.join(path, name)

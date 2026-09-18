@@ -151,6 +151,27 @@ sed "s|Exec=kiosk-manager gui|Exec=$BIN gui|" \
 rm -f "$AUTOSTART_DIR/kiosk-manager.desktop"
 echo "menu entry installed"
 
+# The kiosk page has an "Open GUI" button linking to kioskmgr://show. Register
+# this app as the handler for that scheme so Firefox can hand the link over.
+# No %u in Exec: the URL carries no arguments and `show` takes none.
+cat > "$APPS_DIR/kiosk-manager-url.desktop" <<HANDLER
+[Desktop Entry]
+Type=Application
+Name=Kiosk Manager link handler
+Comment=Opens kioskmgr:// links from the kiosk page
+Exec=$BIN show
+NoDisplay=true
+Terminal=false
+MimeType=x-scheme-handler/kioskmgr;
+HANDLER
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
+fi
+if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default kiosk-manager-url.desktop x-scheme-handler/kioskmgr || true
+fi
+echo "kioskmgr:// link handler registered"
+
 sed "s|%h/.local/bin/kiosk-manager|$BIN|g" \
     "$SRC_DIR/systemd/kiosk-manager.service" > "$UNIT_DIR/kiosk-manager.service"
 echo "unit: $UNIT_DIR/kiosk-manager.service"

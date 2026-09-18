@@ -25,6 +25,7 @@ systemctl --user daemon-reload
 
 rm -f "$HOME/.config/autostart/kiosk-manager.desktop"
 rm -f "$PREFIX/share/applications/kiosk-manager.desktop"
+rm -f "$PREFIX/share/applications/kiosk-manager-url.desktop"
 rm -f "$BIN"
 rm -rf "$LIB_DIR"
 
