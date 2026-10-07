@@ -51,7 +51,7 @@ fi
 say() { printf '\n== %s\n' "$*"; }
 
 # --------------------------------------------------------------- dependencies
-PACKAGES="python3 python3-gi gir1.2-gtk-3.0 x11-xserver-utils xdotool wmctrl git firefox-esr"
+PACKAGES="python3 python3-gi gir1.2-gtk-3.0 x11-xserver-utils x11-utils xdotool git firefox-esr"
 if [ "$INSTALL_DEPS" = "1" ]; then
     say "Installing packages"
     sudo apt-get update
@@ -72,7 +72,6 @@ python3 -c "import gi; gi.require_version('Gtk','3.0')" \
     >/dev/null 2>&1 || MISSING="$MISSING python3-gi/gir1.2-gtk-3.0"
 command -v xset >/dev/null 2>&1 || MISSING="$MISSING x11-xserver-utils"
 command -v xdotool >/dev/null 2>&1 || MISSING="$MISSING xdotool"
-command -v wmctrl >/dev/null 2>&1 || MISSING="$MISSING wmctrl"
 if [ -n "$MISSING" ]; then
     echo "Missing:$MISSING"
     echo "Install them with:"
@@ -83,6 +82,10 @@ fi
 echo "All present."
 command -v git >/dev/null 2>&1 || \
     echo "Note: git is not installed; automatic updates need it (sudo apt-get install git)."
+# Optional so an automatic update never fails on it; the watchdog skips its
+# checks (and says so on the Status tab) until it is installed.
+command -v xprop >/dev/null 2>&1 || \
+    echo "Note: xprop is not installed; the watchdog needs it (sudo apt-get install x11-utils)."
 
 FIREFOX="$(command -v firefox || command -v firefox-esr || echo /usr/bin/firefox)"
 
@@ -151,15 +154,15 @@ sed "s|Exec=kiosk-manager gui|Exec=$BIN gui|" \
 rm -f "$AUTOSTART_DIR/kiosk-manager.desktop"
 echo "menu entry installed"
 
-# The kiosk page has an "Open GUI" button linking to kioskmgr://show. Register
-# this app as the handler for that scheme so Firefox can hand the link over.
-# No %u in Exec: the URL carries no arguments and `show` takes none.
+# The kiosk page has "Open GUI" and "Minimize" buttons linking to
+# kioskmgr://show and kioskmgr://minimize. Register this app as the handler for
+# that scheme so Firefox can hand the link over; %u passes the action through.
 cat > "$APPS_DIR/kiosk-manager-url.desktop" <<HANDLER
 [Desktop Entry]
 Type=Application
 Name=Kiosk Manager link handler
 Comment=Opens kioskmgr:// links from the kiosk page
-Exec=$BIN show
+Exec=$BIN handle-url %u
 NoDisplay=true
 Terminal=false
 MimeType=x-scheme-handler/kioskmgr;
@@ -195,7 +198,9 @@ cfg = {
     "schedule": {"enabled": True, "entries": []},
     "screen": {"manage_timeout": True, "blank_after_minutes": 0,
                "dpms_off_after_minutes": 0, "disable_lock": True},
-    "gui": {"start_minimized": True},
+    "gui": {"keep_running": True},
+    "watchdog": {"enabled": True, "interval_minutes": 5,
+                 "expected_title": "Shop Fund", "operator_grace_minutes": 10},
 }
 with open(path, "w") as fh:
     json.dump(cfg, fh, indent=2)

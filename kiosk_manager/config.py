@@ -74,9 +74,21 @@ DEFAULTS = {
         "disable_lock": True,
     },
     "gui": {
-        "start_minimized": True,
-        # Daemon starts the settings window at boot and restarts it if it dies.
+        # Daemon starts the settings window at boot (behind the kiosk page)
+        # and restarts it if it dies.
         "keep_running": True,
+    },
+    "watchdog": {
+        # Every few minutes: the browser is fullscreen in kiosk mode on the
+        # right page, and the settings window is running behind it.
+        "enabled": True,
+        "interval_minutes": 5,
+        # The kiosk page counts as correct while the window title contains
+        # this. Empty turns the page check off.
+        "expected_title": "Shop Fund",
+        # After someone presses Minimize or uses the settings window, the
+        # watchdog leaves the screen alone for this long.
+        "operator_grace_minutes": 10,
     },
     "update": {
         "enabled": False,
@@ -130,6 +142,8 @@ def load():
         merged["id"] = str(merged.get("id") or uuid.uuid4().hex[:8])
         fixed.append(merged)
     cfg["schedule"]["entries"] = fixed
+    # The window no longer starts minimised; drop the old switch.
+    cfg["gui"].pop("start_minimized", None)
     return cfg
 
 
