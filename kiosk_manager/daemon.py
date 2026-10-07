@@ -1,5 +1,5 @@
 """Background service: boot launch, schedule, screen policy, settings window
-keeper, self-update and IPC."""
+keeper, kiosk watchdog, self-update and IPC."""
 
 import datetime
 import logging
@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 
-from . import browser, config, ipc, procs, scheduler, screen, updater, version
+from . import browser, config, ipc, procs, scheduler, screen, updater, version, x11
 
 log = logging.getLogger("kiosk.daemon")
 
@@ -22,6 +22,10 @@ GUI_RETRY_MAX = 600
 # If the machine has been up longer than this when the daemon starts, this is
 # a service restart (an update or a crash), not a boot: leave the screen alone.
 BOOT_WINDOW_SECONDS = 600
+
+# A page that is still loading has a placeholder title; give it this long
+# before the watchdog judges the title.
+PAGE_LOAD_SECONDS = 90
 
 
 def system_uptime():
@@ -51,6 +55,12 @@ class Daemon:
         self.gui_next_attempt = 0.0
         self.gui_backoff = GUI_RETRY_MIN
         self.gui_restarted_for = None
+        self.watchdog_next = time.time() + 60
+        self.watchdog_result = "not run yet"
+        self.watchdog_at = 0.0
+        # Until this time someone is using the desktop (pressed Minimize or
+        # opened the settings window), so the watchdog leaves the screen alone.
+        self.operator_until = 0.0
         self._stop = threading.Event()
 
     # ---- helpers -------------------------------------------------------
@@ -161,6 +171,9 @@ class Daemon:
 
             if self.display_ready:
                 self.check_gui()
+                if time.time() >= self.watchdog_next:
+                    self.watchdog_next = time.time() + self.watchdog_interval()
+                    self.watchdog()
 
             if self.update_scheduler.due([self.update_entry()], now):
                 ucfg = dict(self.cfg.get("update", {}))
@@ -237,8 +250,127 @@ class Daemon:
         """Once the new window has mapped, put the kiosk page back in front."""
         time.sleep(4)
         with self.lock:
-            if self.browser.is_running():
+            if self.browser.is_running() and not self.operator_active():
                 self.browser.raise_window()
+
+    def gui_window(self):
+        """(reply, window id) for the settings window; the id is None if unknown."""
+        reply = ipc.send(config.gui_socket(), {"command": "ping"}, timeout=2.0)
+        if not reply.get("ok") or not reply.get("pid") or not x11.available():
+            return reply, None
+        wins = x11.search("--all", "--pid", str(reply["pid"]),
+                          "--name", "^Kiosk Manager$")
+        return reply, (wins[-1] if wins else None)
+
+    # ---- watchdog ------------------------------------------------------
+    def watchdog_cfg(self):
+        return self.cfg.get("watchdog", {})
+
+    def watchdog_interval(self):
+        minutes = self.watchdog_cfg().get("interval_minutes", 5)
+        try:
+            return max(1, int(minutes)) * 60
+        except (TypeError, ValueError):
+            return 300
+
+    def operator_active(self):
+        """True while someone is using the desktop instead of the kiosk page."""
+        if time.time() < self.operator_until:
+            return True
+        reply = ipc.send(config.gui_socket(), {"command": "ping"}, timeout=2.0)
+        grace = self.grace_seconds()
+        last = reply.get("last_active") or 0
+        return bool(reply.get("ok") and last and time.time() - last < grace)
+
+    def grace_seconds(self):
+        try:
+            return max(0, int(self.watchdog_cfg().get("operator_grace_minutes", 10))) * 60
+        except (TypeError, ValueError):
+            return 600
+
+    def watchdog(self, force=False):
+        """Put the screen back the way it should be: the settings window
+        running behind a fullscreen kiosk page showing the right site.
+
+        `force` skips the operator grace period (the GUI's Open kiosk page
+        button). Runs under self.lock.
+        """
+        wcfg = self.watchdog_cfg()
+        if not force and not wcfg.get("enabled", True):
+            return "disabled"
+        if not force and self.operator_active():
+            self.watchdog_record("skipped: the desktop is in use")
+            return self.watchdog_result
+        if not x11.available():
+            self.watchdog_record("skipped: xdotool/xprop or DISPLAY missing")
+            return self.watchdog_result
+
+        actions = []
+        gui_reply, gui_win = self.gui_window()
+        if not gui_reply.get("ok"):
+            # check_gui owns the restart backoff; force one attempt now.
+            if self.cfg.get("gui", {}).get("keep_running", True):
+                self.gui_next_attempt = 0
+                self.check_gui("watchdog: settings window not running")
+                actions.append("started the settings window")
+        elif gui_win and "HIDDEN" in x11.state(gui_win):
+            ipc.send(config.gui_socket(), {"command": "restore"}, timeout=2.0)
+            time.sleep(1.0)  # let it map before the stacking check below
+            actions.append("restored the minimised settings window")
+
+        if self.suppress_restart and not force:
+            # Closed on purpose from the GUI or the CLI: leave the desktop up.
+            actions.append("browser closed on purpose, left closed")
+        else:
+            actions.extend(self._check_browser())
+
+        browser_win = self.browser.window_id()
+        _, gui_win = self.gui_window()
+        if browser_win and gui_win and not x11.is_below(gui_win, int(browser_win)):
+            self.browser.raise_window()
+            actions.append("put the settings window behind the page")
+
+        self.watchdog_record(", ".join(actions) or "all good")
+        return self.watchdog_result
+
+    def _check_browser(self):
+        info = self.browser.inspect()
+        want_kiosk = self.cfg.get("browser", {}).get("kiosk", True)
+        loaded = time.time() - self.browser.launched_at > PAGE_LOAD_SECONDS
+        expected = str(self.watchdog_cfg().get("expected_title", "")).strip()
+
+        problem = None
+        if not info["running"]:
+            ok, msg = self.browser.launch()
+            self.browser_was_running = ok
+            return ["browser was not running, opened it: %s" % msg]
+        if info["windows"] == 0:
+            problem = "no browser window"
+        elif info["windows"] > 1:
+            problem = "%d browser windows (popup or dialog)" % info["windows"]
+        elif want_kiosk and not info["kiosk_flag"]:
+            problem = "browser not started in kiosk mode"
+        elif info["minimized"]:
+            self.browser.raise_window()
+            return ["restored the minimised kiosk page"]
+        elif want_kiosk and not info["fullscreen"]:
+            problem = "browser is not fullscreen"
+        elif expected and loaded and expected.lower() not in info["title"].lower():
+            problem = "wrong page (title %r)" % info["title"]
+
+        if not problem:
+            return []
+        log.warning("watchdog: %s, restarting the browser", problem)
+        ok, msg = self.browser.restart()
+        return ["%s, restarted: %s" % (problem, msg)]
+
+    def watchdog_record(self, result):
+        self.watchdog_result = result
+        self.watchdog_at = time.time()
+        if result not in ("all good", "disabled") and not result.startswith("skipped"):
+            self.note("watchdog: %s" % result)
+        else:
+            log.debug("watchdog: %s", result)
 
     # ---- updates -------------------------------------------------------
     def update_entry(self):
@@ -313,6 +445,12 @@ class Daemon:
                     "last_event_at": self.last_event_at,
                 },
                 "browser": self.browser.status(),
+                "watchdog": {
+                    "result": self.watchdog_result,
+                    "at": self.watchdog_at,
+                    "next": self.watchdog_next,
+                    "operator_until": self.operator_until,
+                },
                 "screen": screen.current_state(),
                 "next_run": when.isoformat(sep=" ", timespec="minutes") if when else None,
                 "next_entry": scheduler.describe(entry) if entry else None,
@@ -341,9 +479,32 @@ class Daemon:
         if command == "open":
             with self.lock:
                 self.suppress_restart = False
-                result = self.browser.ensure_open(
-                    return_to_home=request.get("return_to_home", True))
+                self.operator_until = 0.0
+                # Back to the kiosk page: the desktop is no longer in use.
+                ipc.send(config.gui_socket(), {"command": "idle"}, timeout=2.0)
+                if request.get("ensure_kiosk"):
+                    # The GUI's Open kiosk page button: fix whatever is wrong
+                    # (not fullscreen, wrong page, popups) and bring it forward.
+                    self.browser_was_running = True
+                    result = self.watchdog(force=True)
+                    self.browser.raise_window()
+                else:
+                    result = self.browser.ensure_open(
+                        return_to_home=request.get("return_to_home", True))
             self.note("manual open: %s" % result)
+            return {"ok": True, "result": result}
+        if command == "minimize_browser":
+            # The page's Minimize button: show the desktop and settings window
+            # and keep the watchdog off them for the grace period.
+            with self.lock:
+                self.operator_until = time.time() + self.grace_seconds()
+                ok = self.browser.minimize()
+            ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0)
+            self.note("kiosk page minimised from the page")
+            return {"ok": ok, "result": "minimised" if ok else "no kiosk window"}
+        if command == "watchdog":
+            with self.lock:
+                result = self.watchdog(force=bool(request.get("force")))
             return {"ok": True, "result": result}
         if command == "restart_browser":
             with self.lock:

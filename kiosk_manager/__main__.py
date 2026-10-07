@@ -20,11 +20,14 @@ COMMANDS = {
     "reload": "reload",
     "update-check": "update_check",
     "update": "update_now",
+    "watchdog": "watchdog",
+    "minimize": "minimize_browser",
 }
 
 # Commands that touch the network or restart the browser need longer.
 SLOW_COMMANDS = {"update_check": 120, "update_now": 600, "restart_browser": 30,
-                 "stop_browser": 30, "open": 30}
+                 "stop_browser": 30, "open": 60, "watchdog": 60,
+                 "minimize_browser": 10}
 
 
 def setup_logging(verbose=False, to_file=False):
@@ -51,9 +54,32 @@ def cmd_show():
     reply = ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0)
     if reply.get("ok"):
         return 0
-    subprocess.Popen(procs.self_command("gui", "--no-minimize"),
+    subprocess.Popen(procs.self_command("gui", "--show"),
                      start_new_session=True)
     return 0
+
+
+# kioskmgr://<action> links from the kiosk page.
+URL_ACTIONS = {"show", "minimize", "kiosk"}
+
+
+def cmd_handle_url(url):
+    rest = (url or "").split(":", 1)[-1] if ":" in (url or "") else (url or "")
+    action = rest.strip("/").split("/")[0].split("?")[0]
+    action = action.lower() or "show"
+    if action not in URL_ACTIONS:
+        print("unknown kioskmgr action: %s" % action, file=sys.stderr)
+        return 1
+    if action == "show":
+        return cmd_show()
+    if action == "minimize":
+        reply = daemon_call("minimize_browser")
+        if not reply.get("ok"):
+            # Daemon down or no window: at least bring the settings up.
+            cmd_show()
+        return 0
+    reply = daemon_call("open", ensure_kiosk=True)
+    return 0 if reply.get("ok") else 1
 
 
 def main(argv=None):
@@ -65,15 +91,21 @@ def main(argv=None):
 
     sub.add_parser("daemon", help="run the background service")
     gui_parser = sub.add_parser("gui", help="run the configuration window")
+    gui_parser.add_argument("--show", action="store_true",
+                            help="bring the window to the front when it opens")
+    # Older builds started the window with this; same meaning as --show.
     gui_parser.add_argument("--no-minimize", action="store_true",
-                            help="open the window instead of starting minimised")
+                            help=argparse.SUPPRESS)
     show_parser = sub.add_parser("show", help="raise the configuration window")
     # Tolerate a kioskmgr:// URL if a desktop handler passes one through.
     show_parser.add_argument("url", nargs="?", help=argparse.SUPPRESS)
+    url_parser = sub.add_parser(
+        "handle-url", help="run a kioskmgr:// link (show, minimize, kiosk)")
+    url_parser.add_argument("url")
     for name in COMMANDS:
         sub.add_parser(name, help="send the %s command to the daemon" % name)
-    url_parser = sub.add_parser("set-url", help="change the kiosk page")
-    url_parser.add_argument("url")
+    set_url_parser = sub.add_parser("set-url", help="change the kiosk page")
+    set_url_parser.add_argument("url")
     sub.add_parser("config-path", help="print the config file location")
     sub.add_parser("version", help="print the installed version")
 
@@ -88,14 +120,15 @@ def main(argv=None):
     if cmd == "gui":
         setup_logging(args.verbose)
         from . import gui
-        cfg = config.load()
-        minimized = cfg.get("gui", {}).get("start_minimized", True)
-        if getattr(args, "no_minimize", False):
-            minimized = False
-        return gui.main(start_minimized=minimized)
+        return gui.main(show=args.show or args.no_minimize)
 
     if cmd == "show":
+        if args.url:
+            return cmd_handle_url(args.url)
         return cmd_show()
+
+    if cmd == "handle-url":
+        return cmd_handle_url(args.url)
 
     if cmd == "config-path":
         print(config.CONFIG_PATH)

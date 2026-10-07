@@ -1,8 +1,9 @@
 """GTK configuration window for the kiosk daemon.
 
-Lives in the taskbar behind the kiosk page: closing the window only minimises
-it, and the daemon restarts it if it dies. `kiosk-manager show` (bind it to a
-hotkey) brings it to the front.
+Stays open behind the kiosk page: closing the window only sends it back behind
+the page, and the daemon restarts it if it dies. The page's Open GUI and
+Minimize buttons, or `kiosk-manager show` (bind it to a hotkey), bring it to
+the front.
 """
 
 import datetime
@@ -11,6 +12,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 
 import gi
 
@@ -147,22 +149,32 @@ class ScheduleDialog(Gtk.Dialog):
 
 
 class KioskWindow(Gtk.Window):
-    def __init__(self, start_minimized=True):
+    def __init__(self, show=False):
         super().__init__(title="Kiosk Manager")
         self.set_default_size(720, 680)
         self.set_icon_name("preferences-system")
         self.set_skip_taskbar_hint(False)
+        # When someone last touched this window. The daemon's watchdog leaves
+        # the screen alone for a while after that.
+        self.last_active = 0.0
 
         self.cfg = self._fetch_config()
         self._build()
         self.connect("delete-event", self._on_delete)
+        # Real input only (a window manager may focus the window when it
+        # maps). Capture phase, because buttons swallow their own presses.
+        self._press = Gtk.GestureMultiPress.new(self)
+        self._press.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        self._press.connect("pressed", self._on_activity)
+        self.connect("key-press-event", self._on_activity)
 
-        if start_minimized:
-            # Iconify before mapping so the window never flashes over the
-            # kiosk page, and do not steal focus from it.
+        if not show:
+            # Opened by the daemon at boot: map behind the kiosk page without
+            # taking focus from it. The daemon raises the page afterwards.
             self.set_focus_on_map(False)
-            self.iconify()
         self.show_all()
+        if show:
+            self.present_window()
 
         GLib.timeout_add_seconds(3, self._refresh_status)
         self._refresh_status()
@@ -230,8 +242,9 @@ class KioskWindow(Gtk.Window):
         save.connect("clicked", self._on_save)
         revert = Gtk.Button(label="Revert")
         revert.connect("clicked", self._on_revert)
-        kiosk = Gtk.Button(label="Show kiosk page")
+        kiosk = Gtk.Button(label="Open kiosk page (fullscreen)")
         kiosk.get_style_context().add_class("big-button")
+        kiosk.get_style_context().add_class("suggested-action")
         kiosk.connect("clicked", self._on_show_kiosk)
         actions.pack_start(save, True, True, 0)
         actions.pack_start(revert, False, False, 0)
@@ -288,6 +301,29 @@ class KioskWindow(Gtk.Window):
         self.restart_switch = self._switch_row(
             box, "Reopen automatically if the browser is closed or crashes",
             self.cfg.get("boot", {}).get("restart_if_closed", True))
+
+        wcfg = self.cfg.get("watchdog", {})
+        box.add(self._title("Watchdog"))
+        self.watchdog_switch = self._switch_row(
+            box, "Check the screen regularly and fix it",
+            wcfg.get("enabled", True))
+        self.watchdog_spin = Gtk.SpinButton.new_with_range(1, 120, 1)
+        self.watchdog_spin.set_value(wcfg.get("interval_minutes", 5))
+        box.add(self._field_row("Check every (minutes)", self.watchdog_spin))
+        self.title_entry = Gtk.Entry()
+        self.title_entry.set_text(wcfg.get("expected_title", ""))
+        self.title_entry.set_placeholder_text("empty = do not check the page")
+        box.add(self._field_row("Page title must contain", self.title_entry))
+        self.grace_spin = Gtk.SpinButton.new_with_range(0, 240, 1)
+        self.grace_spin.set_value(wcfg.get("operator_grace_minutes", 10))
+        box.add(self._field_row("Leave the screen alone after use (minutes)",
+                                self.grace_spin))
+        box.add(self._hint("Each check: if the browser is not fullscreen in "
+                           "kiosk mode, shows another page, an error or a "
+                           "popup, it is closed and reopened on the kiosk "
+                           "page. This window is reopened if it has closed and "
+                           "kept behind the page. Checks pause while someone "
+                           "is using this window or after Minimize on the page."))
         return box
 
     def _page_schedule(self):
@@ -369,12 +405,9 @@ class KioskWindow(Gtk.Window):
             box, "Keep this window running: start it at boot and reopen it "
                  "if it is closed",
             gcfg.get("keep_running", True))
-        self.minimized_switch = self._switch_row(
-            box, "Start minimised in the taskbar",
-            gcfg.get("start_minimized", True))
-        box.add(self._hint("The window always opens behind the kiosk page. Bring "
-                           "it forward from the taskbar or with the "
-                           "kiosk-manager show hotkey."))
+        box.add(self._hint("The window opens behind the kiosk page. Bring it "
+                           "forward with Open GUI or Minimize on the page, or "
+                           "the kiosk-manager show hotkey."))
 
         box.add(self._title("Automatic updates"))
         self.update_switch = self._switch_row(
@@ -421,8 +454,11 @@ class KioskWindow(Gtk.Window):
 
         box.add(self._title("Browser controls"))
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, command in (("Open page now", "open"),
-                               ("Restart browser", "restart_browser"),
+        open_button = Gtk.Button(label="Open page now")
+        open_button.get_style_context().add_class("big-button")
+        open_button.connect("clicked", self._on_show_kiosk)
+        row.pack_start(open_button, True, True, 0)
+        for label, command in (("Restart browser", "restart_browser"),
                                ("Close browser", "stop_browser")):
             button = Gtk.Button(label=label)
             button.get_style_context().add_class("big-button")
@@ -582,9 +618,12 @@ class KioskWindow(Gtk.Window):
             "dpms_off_after_minutes": int(self.dpms_spin.get_value()),
             "disable_lock": self.lock_switch.get_active(),
         })
-        cfg.setdefault("gui", {}).update({
-            "keep_running": self.keep_gui_switch.get_active(),
-            "start_minimized": self.minimized_switch.get_active(),
+        cfg.setdefault("gui", {})["keep_running"] = self.keep_gui_switch.get_active()
+        cfg.setdefault("watchdog", {}).update({
+            "enabled": self.watchdog_switch.get_active(),
+            "interval_minutes": int(self.watchdog_spin.get_value()),
+            "expected_title": self.title_entry.get_text().strip(),
+            "operator_grace_minutes": int(self.grace_spin.get_value()),
         })
         cfg.setdefault("update", {}).update(self._collect_update())
         return cfg
@@ -625,7 +664,11 @@ class KioskWindow(Gtk.Window):
         self.dpms_spin.set_value(scfg.get("dpms_off_after_minutes", 0))
         self.lock_switch.set_active(scfg.get("disable_lock", True))
         self.keep_gui_switch.set_active(gcfg.get("keep_running", True))
-        self.minimized_switch.set_active(gcfg.get("start_minimized", True))
+        wcfg = cfg.get("watchdog", {})
+        self.watchdog_switch.set_active(wcfg.get("enabled", True))
+        self.watchdog_spin.set_value(wcfg.get("interval_minutes", 5))
+        self.title_entry.set_text(wcfg.get("expected_title", ""))
+        self.grace_spin.set_value(wcfg.get("operator_grace_minutes", 10))
         self.update_switch.set_active(ucfg.get("enabled", False))
         hour, minute = scheduler.parse_hhmm(ucfg.get("time", "03:00"))
         self.update_hour.set_value(hour)
@@ -638,12 +681,25 @@ class KioskWindow(Gtk.Window):
         self._flash("Reloaded the saved settings", ok=True)
 
     def _on_show_kiosk(self, *_args):
-        self.iconify()
-        reply = call("open", timeout=30, return_to_home=False)
-        if not reply.get("ok"):
-            self.present_window()
-            self._flash("Could not show the kiosk page: %s"
-                        % reply.get("error", "?"), ok=False)
+        """Fullscreen kiosk page on the right site, in front of this window.
+
+        The daemon fixes whatever is wrong first (restarts a browser that is
+        not fullscreen, on another page, or showing a popup), so this may take
+        a few seconds.
+        """
+        self.last_active = 0.0  # done here: let the watchdog take over again
+        self._flash("Opening the kiosk page...", ok=True)
+
+        def done(reply):
+            if reply.get("ok"):
+                self._flash("Kiosk page: %s" % reply.get("result"), ok=True)
+            else:
+                self._flash("Could not open the kiosk page: %s"
+                            % reply.get("error", "?"), ok=False)
+            self._refresh_status()
+
+        self._call_async("open", done, timeout=60, return_to_home=False,
+                         ensure_kiosk=True)
 
     def _set_update_buttons(self, sensitive):
         self.check_button.set_sensitive(sensitive)
@@ -716,6 +772,9 @@ class KioskWindow(Gtk.Window):
                 str(p) for p in browser_info.get("pids") or [])
                 if browser_info.get("running") else "not running"),
             "Window found: %s" % ("yes" if browser_info.get("window") else "no"),
+            "Watchdog: %s (%s)" % (
+                (reply.get("watchdog") or {}).get("result", "?"),
+                when((reply.get("watchdog") or {}).get("at"))),
             "Next scheduled event: %s" % (reply.get("next_run") or "none"),
             "   %s" % (reply.get("next_entry") or ""),
             "Session: %s (DISPLAY=%s)" % (screen_info.get("session_type"),
@@ -758,37 +817,56 @@ class KioskWindow(Gtk.Window):
             return "%dm" % (seconds // 60)
         return "%dh %dm" % (seconds // 3600, (seconds % 3600) // 60)
 
+    def _on_activity(self, *_args):
+        self.last_active = time.time()
+        return False
+
     def _on_delete(self, *_args):
-        # Never actually quit: the operator gets it back from the taskbar.
-        self.iconify()
+        # Never actually quit: go back behind the kiosk page.
+        self._on_show_kiosk()
         return True
 
     def present_window(self):
+        self.last_active = time.time()
         self.set_focus_on_map(True)
         self.deiconify()
         self.present()
         return False
 
+    def restore_window(self):
+        """Un-minimise without taking focus; the daemon re-raises the page."""
+        self.set_focus_on_map(False)
+        self.deiconify()
+        self.show()
+        return False
 
-def main(start_minimized=True):
+
+def main(show=False):
     existing = ipc.send(config.gui_socket(), {"command": "ping"}, timeout=2.0)
     if existing.get("ok"):
         # Single instance: hand the request to the window that is already up.
-        if not start_minimized:
+        if show:
             ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0)
         log.info("settings window already running")
         return 0
 
-    window = KioskWindow(start_minimized=start_minimized)
+    window = KioskWindow(show=show)
 
     def handler(request):
         command = (request or {}).get("command")
         if command == "show":
             GLib.idle_add(window.present_window)
             return {"ok": True}
+        if command == "idle":
+            window.last_active = 0.0
+            return {"ok": True}
+        if command == "restore":
+            GLib.idle_add(window.restore_window)
+            return {"ok": True}
         if command == "ping":
             return {"ok": True, "pong": True, "pid": os.getpid(),
-                    "version": version.RUNNING_COMMIT}
+                    "version": version.RUNNING_COMMIT,
+                    "last_active": window.last_active}
         if command == "quit":
             GLib.idle_add(Gtk.main_quit)
             return {"ok": True}

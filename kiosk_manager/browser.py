@@ -9,7 +9,7 @@ import signal
 import subprocess
 import time
 
-from . import config, procs
+from . import config, procs, x11
 
 log = logging.getLogger("kiosk.browser")
 
@@ -131,21 +131,21 @@ class BrowserManager:
             return True
         return bool(self._find_pids())
 
-    def window_id(self):
-        """Return the X11 window id of the kiosk window, if it is mapped."""
-        if not _has("xdotool") or not os.environ.get("DISPLAY"):
-            return None
-        for needle in (MARKER, "firefox"):
-            ok, out = _run(["xdotool", "search", "--onlyvisible", "--class", needle])
-            if not ok:
-                continue
-            ids = [line.strip() for line in out.splitlines() if line.strip()]
-            if ids:
-                return ids[-1]
-        return None
+    def windows(self):
+        """Managed X11 windows of the kiosk instance, minimised ones included."""
+        if not os.environ.get("DISPLAY") or not _has("xdotool"):
+            return []
+        if x11.available():
+            return x11.search("--class", MARKER)
+        ok, out = _run(["xdotool", "search", "--onlyvisible", "--class", MARKER])
+        return [int(t) for t in out.split() if t.isdigit()] if ok else []
 
-    def running_url(self):
-        """The URL the running kiosk instance was launched with, if readable."""
+    def window_id(self):
+        """The X11 window id of the kiosk window, if it has one."""
+        wins = self.windows()
+        return str(wins[-1]) if wins else None
+
+    def _cmdline(self):
         for pid in self._find_pids():
             try:
                 with open("/proc/%d/cmdline" % pid, "rb") as fh:
@@ -154,8 +154,33 @@ class BrowserManager:
                 continue
             args = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
             if MARKER in args:
-                return args[-1]
-        return None
+                return args
+        return []
+
+    def inspect(self):
+        """What is on screen right now, for the watchdog."""
+        wins = self.windows()
+        info = {
+            "running": self.is_running(),
+            "kiosk_flag": "--kiosk" in self._cmdline(),
+            "windows": len(wins),
+            "fullscreen": False,
+            "minimized": False,
+            "title": "",
+        }
+        if wins and x11.available():
+            wid = wins[-1]
+            states = x11.state(wid)
+            info["fullscreen"] = "FULLSCREEN" in states
+            info["minimized"] = "HIDDEN" in states
+            info["title"] = x11.title(wid)
+            info["window"] = wid
+        return info
+
+    def running_url(self):
+        """The URL the running kiosk instance was launched with, if readable."""
+        args = self._cmdline()
+        return args[-1] if args else None
 
     def _use_profile(self):
         return bool(self.cfg.get("browser", {}).get("use_managed_profile", True))
@@ -234,14 +259,15 @@ class BrowserManager:
 
     def raise_window(self):
         wid = self.window_id()
-        if wid and _has("xdotool"):
-            _run(["xdotool", "windowactivate", "--sync", wid])
-            _run(["xdotool", "windowraise", wid])
-            return True
-        if _has("wmctrl"):
-            ok, _ = _run(["wmctrl", "-a", "Mozilla Firefox"])
-            return ok
-        return False
+        if not wid:
+            return False
+        x11.activate(wid)
+        return True
+
+    def minimize(self):
+        """Drop the kiosk window to reveal the settings window behind it."""
+        wid = self.window_id()
+        return bool(wid) and x11.minimize(wid)
 
     def return_to_home(self):
         """Send Alt+Home so an idle kiosk goes back to the configured URL."""
