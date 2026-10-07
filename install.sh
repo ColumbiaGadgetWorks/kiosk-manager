@@ -183,9 +183,9 @@ echo "unit: $UNIT_DIR/kiosk-manager.service"
 say "Seeding configuration"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
-    # The bare fundbot URL from the old startup.sh is upgraded to the ?kiosk
-    # layout by config.load(), so it is safe to carry over here.
-    URL="${URL_OVERRIDE:-${OLD_URL:-https://fundbot.adman.casa/?kiosk}}"
+    # The old fundbot URL from startup.sh is upgraded to the website's
+    # /kiosk/ page by config.load(), so it is safe to carry over here.
+    URL="${URL_OVERRIDE:-${OLD_URL:-https://columbiagadgetworks.org/kiosk/?kiosk}}"
     python3 - "$CONFIG_FILE" "$URL" "$FIREFOX" <<'PYSEED'
 import json, sys
 path, url, firefox = sys.argv[1], sys.argv[2], sys.argv[3]

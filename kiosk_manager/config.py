@@ -36,14 +36,19 @@ def gui_socket():
     return os.path.join(runtime_dir(), "gui.sock")
 
 
-DEFAULT_URL = "https://fundbot.adman.casa/?kiosk"
+# The shop touchscreen page on the CGW website (unlinked from the rest of the
+# site); ?kiosk turns on its touchscreen layout.
+DEFAULT_URL = "https://columbiagadgetworks.org/kiosk/?kiosk"
 
-# URLs older installs wrote (the old startup.sh page, or the installer
-# placeholder). They are upgraded to DEFAULT_URL so the fundbot sheet shows its
-# kiosk layout; any other URL is left exactly as configured.
+# URLs older installs wrote (the old startup.sh page, the installer
+# placeholder, and the fundbot sheet the kiosk used before the page moved to
+# the website). They are upgraded to DEFAULT_URL; any other URL is left
+# exactly as configured.
 LEGACY_URLS = {
     "https://fundbot.adman.casa/",
     "https://fundbot.adman.casa",
+    "https://fundbot.adman.casa/?kiosk",
+    "https://fundbot.adman.casa/?kiosk=1",
     "https://example.com/",
 }
 
