@@ -19,7 +19,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from . import config, ipc, scheduler, version  # noqa: E402
+from . import config, instance, ipc, scheduler, version  # noqa: E402
 
 log = logging.getLogger("kiosk.gui")
 
@@ -698,8 +698,10 @@ class KioskWindow(Gtk.Window):
                             % reply.get("error", "?"), ok=False)
             self._refresh_status()
 
+        # from_gui: this window is the one asking, so the daemon leaves it be
+        # instead of restoring or restacking it on the way.
         self._call_async("open", done, timeout=60, return_to_home=False,
-                         ensure_kiosk=True)
+                         ensure_kiosk=True, from_gui=True)
 
     def _set_update_buttons(self, sensitive):
         self.check_button.set_sensitive(sensitive)
@@ -837,36 +839,60 @@ class KioskWindow(Gtk.Window):
         """Un-minimise without taking focus; the daemon re-raises the page."""
         self.set_focus_on_map(False)
         self.deiconify()
+        self.unmaximize()
         self.show()
         return False
 
 
-def main(show=False):
-    existing = ipc.send(config.gui_socket(), {"command": "ping"}, timeout=2.0)
-    if existing.get("ok"):
-        # Single instance: hand the request to the window that is already up.
-        if show:
-            ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0)
-        log.info("settings window already running")
-        return 0
+def _hand_over(show):
+    """Another copy holds the lock: pass a show request to it and exit."""
+    if show:
+        # It may still be starting up; give it a few seconds to answer.
+        for _ in range(10):
+            if ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0).get("ok"):
+                break
+            time.sleep(1.0)
+    log.info("settings window already running (pid %s)", instance.holder("gui"))
+    return 0
 
-    window = KioskWindow(show=show)
+
+def main(show=False):
+    # One settings window per user, enforced with a lock rather than by
+    # pinging the socket, which a copy that is still starting cannot answer.
+    if not instance.acquire("gui"):
+        return _hand_over(show)
+
+    # The socket goes up before the window is built, so the daemon can see
+    # this copy from the first moment and never starts another.
+    state = {"window": None, "show": False}
+
+    def on_window(fn):
+        def run():
+            if state["window"] is not None:
+                fn(state["window"])
+            return False
+        GLib.idle_add(run)
 
     def handler(request):
         command = (request or {}).get("command")
+        window = state["window"]
         if command == "show":
-            GLib.idle_add(window.present_window)
+            if window is None:
+                state["show"] = True
+            else:
+                on_window(lambda w: w.present_window())
             return {"ok": True}
         if command == "idle":
-            window.last_active = 0.0
+            if window is not None:
+                window.last_active = 0.0
             return {"ok": True}
         if command == "restore":
-            GLib.idle_add(window.restore_window)
+            on_window(lambda w: w.restore_window())
             return {"ok": True}
         if command == "ping":
             return {"ok": True, "pong": True, "pid": os.getpid(),
                     "version": version.RUNNING_COMMIT,
-                    "last_active": window.last_active}
+                    "last_active": window.last_active if window else 0.0}
         if command == "quit":
             GLib.idle_add(Gtk.main_quit)
             return {"ok": True}
@@ -877,6 +903,10 @@ def main(show=False):
         server.start()
     except OSError as exc:
         log.warning("could not start gui ipc socket: %s", exc)
+
+    state["window"] = KioskWindow(show=show)
+    if state["show"] and not show:
+        state["window"].present_window()
     Gtk.main()
     server.stop()
     return 0

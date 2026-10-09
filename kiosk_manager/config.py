@@ -20,9 +20,17 @@ LOG_PATH = os.path.join(DATA_DIR, "kiosk-manager.log")
 
 
 def runtime_dir():
+    # The service always has XDG_RUNTIME_DIR; a desktop session started
+    # without logind may not. Both must land on the same sockets, or a copy
+    # started from the desktop cannot find the running one and starts a
+    # second settings window.
     base = os.environ.get("XDG_RUNTIME_DIR")
     if not base:
-        base = os.path.join(tempfile.gettempdir(), "kiosk-manager-%d" % os.getuid())
+        user_run = "/run/user/%d" % os.getuid()
+        if os.path.isdir(user_run) and os.access(user_run, os.W_OK):
+            base = user_run
+        else:
+            base = os.path.join(tempfile.gettempdir(), "kiosk-manager-%d" % os.getuid())
     d = os.path.join(base, APP)
     os.makedirs(d, exist_ok=True)
     return d

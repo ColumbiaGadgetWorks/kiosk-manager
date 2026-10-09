@@ -9,7 +9,8 @@ import subprocess
 import threading
 import time
 
-from . import browser, config, ipc, procs, scheduler, screen, updater, version, x11
+from . import (browser, config, instance, ipc, procs, scheduler, screen, updater,
+               version, x11)
 
 log = logging.getLogger("kiosk.daemon")
 
@@ -26,6 +27,10 @@ BOOT_WINDOW_SECONDS = 600
 # A page that is still loading has a placeholder title; give it this long
 # before the watchdog judges the title.
 PAGE_LOAD_SECONDS = 90
+
+# A settings window that holds its lock but has not answered for this long is
+# hung: it is stopped so a working one can start.
+GUI_HUNG_SECONDS = 120
 
 
 def system_uptime():
@@ -55,6 +60,7 @@ class Daemon:
         self.gui_next_attempt = 0.0
         self.gui_backoff = GUI_RETRY_MIN
         self.gui_restarted_for = None
+        self.gui_silent_since = 0.0
         self.watchdog_next = time.time() + 60
         self.watchdog_result = "not run yet"
         self.watchdog_at = 0.0
@@ -88,6 +94,13 @@ class Daemon:
     # ---- lifecycle -----------------------------------------------------
     def start(self):
         os.makedirs(config.DATA_DIR, exist_ok=True)
+        if not instance.acquire("daemon"):
+            # A second daemon would fight the first over the browser and the
+            # settings window. systemd retries, so this clears once the other
+            # one is stopped.
+            log.error("another kiosk-manager daemon is running (pid %s), exiting",
+                      instance.holder("daemon"))
+            raise SystemExit(1)
         log.info("kiosk-manager %s starting", version.describe())
         self.server = ipc.Server(config.daemon_socket(), self.handle)
         self.server.start()
@@ -198,12 +211,25 @@ class Daemon:
         """Keep the settings window running, and on the installed build."""
         reply = ipc.send(config.gui_socket(), {"command": "ping"}, timeout=2.0)
         if reply.get("ok"):
+            self.gui_silent_since = 0.0
             if reply.get("version") != version.installed_commit():
                 self._restart_outdated_gui(reply)
             return
+        now = time.time()
+        holder = instance.holder("gui")
+        if holder:
+            # A window is running (it holds the lock) but not answering: it is
+            # still starting, or hung. Never start a second one beside it.
+            if not self.gui_silent_since:
+                self.gui_silent_since = now
+            elif now - self.gui_silent_since > GUI_HUNG_SECONDS:
+                log.warning("settings window (pid %s) stopped answering, restarting it", holder)
+                self._kill(holder)
+                self.gui_silent_since = 0.0
+            return
+        self.gui_silent_since = 0.0
         if not self.cfg.get("gui", {}).get("keep_running", True):
             return
-        now = time.time()
         if now < self.gui_next_attempt:
             return
         if self.gui_launched_at and now - self.gui_launched_at < 60:
@@ -231,7 +257,11 @@ class Daemon:
                                    check=False, timeout=5)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 log.warning("could not stop the old settings window: %s", exc)
-        time.sleep(1.5)
+        # The new window cannot start until the old one has let go of its lock.
+        for _ in range(20):
+            if not instance.holder("gui"):
+                break
+            time.sleep(0.5)
         self.launch_gui("updated")
 
     def launch_gui(self, reason):
@@ -252,6 +282,48 @@ class Daemon:
         with self.lock:
             if self.browser.is_running() and not self.operator_active():
                 self.browser.raise_window()
+
+    @staticmethod
+    def _kill(pid):
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, ValueError) as exc:
+            log.warning("could not stop pid %s: %s", pid, exc)
+
+    def stray_guis(self):
+        """Settings window processes other than the one holding the lock.
+
+        Builds from before the lock existed, or a copy started where it could
+        not see the running one, would otherwise sit on screen as a second
+        settings window.
+        """
+        keep = instance.holder("gui")
+        ok, out = x11._run(["pgrep", "-u", str(os.getuid()), "-f", "kiosk_manager gui"])
+        if not ok:
+            return []
+        strays = []
+        for token in out.split():
+            try:
+                pid = int(token)
+            except ValueError:
+                continue
+            if pid in (os.getpid(), keep):
+                continue
+            try:
+                # One the daemon has only just started may not hold the lock yet.
+                if time.time() - os.stat("/proc/%d" % pid).st_ctime < 30:
+                    continue
+            except OSError:
+                continue
+            try:
+                with open("/proc/%d/cmdline" % pid, "rb") as fh:
+                    args = fh.read().split(b"\0")
+            except OSError:
+                continue
+            # Only the python process itself, not a shell that mentions it.
+            if b"kiosk_manager" in args and b"gui" in args:
+                strays.append(pid)
+        return strays
 
     def gui_window(self):
         """(reply, window id) for the settings window; the id is None if unknown."""
@@ -288,12 +360,14 @@ class Daemon:
         except (TypeError, ValueError):
             return 600
 
-    def watchdog(self, force=False):
-        """Put the screen back the way it should be: the settings window
-        running behind a fullscreen kiosk page showing the right site.
+    def watchdog(self, force=False, touch_gui=True):
+        """Put the screen back the way it should be: one settings window
+        running behind a fullscreen kiosk page showing the right site, and the
+        screen timeouts as configured.
 
         `force` skips the operator grace period (the GUI's Open kiosk page
-        button). Runs under self.lock.
+        button). `touch_gui=False` leaves the settings window alone, for when
+        it is the window asking. Runs under self.lock.
         """
         wcfg = self.watchdog_cfg()
         if not force and not wcfg.get("enabled", True):
@@ -306,8 +380,23 @@ class Daemon:
             return self.watchdog_result
 
         actions = []
+        strays = self.stray_guis()
+        for pid in strays:
+            self._kill(pid)
+        if strays:
+            actions.append("closed %d extra settings window%s"
+                           % (len(strays), "" if len(strays) == 1 else "s"))
+            time.sleep(1.0)
+
+        drifted = screen.drift(self.cfg)
+        if drifted:
+            self.apply_screen()
+            actions.append("screen settings had changed (%s), re-applied" % drifted)
+
         gui_reply, gui_win = self.gui_window()
-        if not gui_reply.get("ok"):
+        if not touch_gui:
+            pass
+        elif not gui_reply.get("ok"):
             # check_gui owns the restart backoff; force one attempt now.
             if self.cfg.get("gui", {}).get("keep_running", True):
                 self.gui_next_attempt = 0
@@ -329,6 +418,12 @@ class Daemon:
         if browser_win and gui_win and not x11.is_below(gui_win, int(browser_win)):
             self.browser.raise_window()
             actions.append("put the settings window behind the page")
+        elif browser_win and not self.suppress_restart:
+            top = x11.top_app_window()
+            if top and top != int(browser_win):
+                # Some other window (a dialog, another app) is covering the page.
+                self.browser.raise_window()
+                actions.append("brought the page back in front of %r" % x11.title(top)[:40])
 
         self.watchdog_record(", ".join(actions) or "all good")
         return self.watchdog_result
@@ -486,7 +581,8 @@ class Daemon:
                     # The GUI's Open kiosk page button: fix whatever is wrong
                     # (not fullscreen, wrong page, popups) and bring it forward.
                     self.browser_was_running = True
-                    result = self.watchdog(force=True)
+                    result = self.watchdog(
+                        force=True, touch_gui=not request.get("from_gui"))
                     self.browser.raise_window()
                 else:
                     result = self.browser.ensure_open(

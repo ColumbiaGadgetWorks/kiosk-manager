@@ -76,6 +76,27 @@ def state(wid):
             for a in atoms.split(",") if a.strip()}
 
 
+def window_types(wid):
+    """Set of _NET_WM_WINDOW_TYPE names, e.g. {"NORMAL"} or {"DOCK"}."""
+    ok, out = _run(["xprop", "-id", str(wid), "_NET_WM_WINDOW_TYPE"])
+    if not ok or "=" not in out:
+        return set()
+    return {a.strip().replace("_NET_WM_WINDOW_TYPE_", "")
+            for a in out.split("=", 1)[1].split(",") if a.strip()}
+
+
+def top_app_window():
+    """The highest visible application window, skipping panels, docks and the
+    desktop, which window managers keep above or below everything."""
+    for wid in reversed(stacking()):
+        if window_types(wid) & {"DOCK", "DESKTOP", "NOTIFICATION", "TOOLTIP"}:
+            continue
+        if "HIDDEN" in state(wid):
+            continue
+        return wid
+    return None
+
+
 def title(wid):
     ok, out = _run(["xdotool", "getwindowname", str(wid)])
     return out.strip() if ok else ""
