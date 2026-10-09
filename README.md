@@ -11,8 +11,9 @@ What it does:
 * At configurable times and days of the week it wakes the screen and opens the
   kiosk page **only if it is not already open** (if it is open, the window is
   raised and optionally sent back to the home URL).
-* Sets the session screen blanking and panel power off timeouts, and can
-  disable the lock screen and screensaver.
+* Sets the session screen blanking and panel power off timeouts (xset, plus the
+  GNOME, Cinnamon and XFCE power managers' own settings), keeps checking they
+  stay set, and can disable the lock screen and screensaver.
 * Every 5 minutes a watchdog checks that Firefox is fullscreen in kiosk mode on
   the right page (not another site, an error page, a login page or a popup),
   and closes and reopens it if not. It also checks that the settings window is
@@ -273,7 +274,12 @@ and can be edited by hand; run `kiosk-manager reload` afterwards.
   pages, login pages and other sites all have other titles). A minimised page
   is just restored. The settings window is reopened if it is gone,
   un-minimised if it is minimised, and put back under the page if it is on
-  top. Checks pause after Minimize on the page or a touch in the settings
+  top. Only one settings window may run (a lock in
+  `~/.local/share/kiosk-manager/gui.lock`); any extra copy is closed, and any
+  other application window covering the page is put behind it. The screen
+  timeouts are read back with `xset q` and re-applied if a desktop power
+  manager or screensaver has changed them, which is the usual reason a kiosk
+  screen stops turning off. Checks pause after Minimize on the page or a touch in the settings
   window, and never reopen a browser that was closed on purpose from the GUI
   or with `kiosk-manager stop`.
 * **Settings window keeper**: with `gui.keep_running` on, the service starts
