@@ -178,8 +178,11 @@ def wake():
 def blank_now():
     """Force the panel off immediately (useful for testing from the GUI)."""
     if is_x11():
-        _run(["xset", "dpms", "force", "off"])
-        return True
+        # "force off" is ignored while DPMS is disabled, which is the default
+        # (never power off), so switch it on first. The timeouts stay as set.
+        _run(["xset", "+dpms"])
+        ok, _ = _run(["xset", "dpms", "force", "off"])
+        return ok
     if _has("gdbus"):
         ok, _ = _run(["gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",
                       "--object-path", "/org/gnome/ScreenSaver",

@@ -43,6 +43,8 @@ def describe(entry):
     actions = []
     if entry.get("wake_screen", True):
         actions.append("wake screen")
+    if entry.get("blank_screen", False):
+        actions.append("blank screen")
     if entry.get("open_browser", True):
         actions.append("open page")
         if entry.get("return_to_home", True):

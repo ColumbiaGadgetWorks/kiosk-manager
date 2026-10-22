@@ -112,6 +112,8 @@ class ScheduleDialog(Gtk.Dialog):
 
         self.wake = self._switch_row(box, "Wake the screen",
                                      entry.get("wake_screen", True))
+        self.blank = self._switch_row(box, "Blank the screen",
+                                      entry.get("blank_screen", False))
         self.open_browser = self._switch_row(box, "Open the kiosk page",
                                              entry.get("open_browser", True))
         self.return_home = self._switch_row(
@@ -141,6 +143,7 @@ class ScheduleDialog(Gtk.Dialog):
             "time": spin_time(self.hour, self.minute),
             "days": selected_days(self.day_buttons),
             "wake_screen": self.wake.get_active(),
+            "blank_screen": self.blank.get_active(),
             "open_browser": self.open_browser.get_active(),
             "return_to_home": self.return_home.get_active(),
             "enabled": self.enabled.get_active(),
