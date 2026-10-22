@@ -40,6 +40,38 @@ def session_type():
     return (os.environ.get("XDG_SESSION_TYPE") or "").lower() or "unknown"
 
 
+def is_wayland():
+    """True on a Wayland session. The service may not inherit
+    XDG_SESSION_TYPE, so fall back to the compositor's socket."""
+    if session_type() == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
+        return True
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+    return os.path.exists(os.path.join(runtime, "wayland-0"))
+
+
+def _mutter_power(mode):
+    """GNOME/Mutter panel power: 0 = on, 1 = off. Works on Wayland and X11."""
+    if not _has("gdbus"):
+        return False
+    ok, _ = _run(["gdbus", "call", "--session",
+                  "--dest", "org.gnome.Mutter.DisplayConfig",
+                  "--object-path", "/org/gnome/Mutter/DisplayConfig",
+                  "--method", "org.freedesktop.DBus.Properties.Set",
+                  "org.gnome.Mutter.DisplayConfig", "PowerSaveMode",
+                  "<int32 %d>" % mode])
+    return ok
+
+
+def _screensaver(active):
+    if not _has("gdbus"):
+        return False
+    ok, _ = _run(["gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",
+                  "--object-path", "/org/gnome/ScreenSaver",
+                  "--method", "org.gnome.ScreenSaver.SetActive",
+                  "true" if active else "false"])
+    return ok
+
+
 def is_x11():
     # An X display is usable whenever DISPLAY is set and xset can talk to it.
     return bool(os.environ.get("DISPLAY")) and _has("xset")
@@ -155,6 +187,14 @@ def drift(cfg):
 def wake():
     """Bring the panel back on and reset the idle timer."""
     done = []
+    if is_wayland():
+        # xset only reaches XWayland there, not the real panel.
+        if _mutter_power(0):
+            done.append("mutter")
+        if _screensaver(False):
+            done.append("gnome-screensaver")
+        log.info("wake via %s", ",".join(done) or "nothing available")
+        return done
     if is_x11():
         _run(["xset", "dpms", "force", "on"])
         _run(["xset", "s", "reset"])
@@ -177,6 +217,10 @@ def wake():
 
 def blank_now():
     """Force the panel off immediately (useful for testing from the GUI)."""
+    if is_wayland():
+        # Power the panel off through Mutter; if that is refused, fall back to
+        # the shell's black screen.
+        return _mutter_power(1) or _screensaver(True)
     if is_x11():
         # "force off" is ignored while DPMS is disabled, which is the default
         # (never power off), so switch it on first. The timeouts stay as set.
