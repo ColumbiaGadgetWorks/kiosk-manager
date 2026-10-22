@@ -120,6 +120,7 @@ def new_schedule_entry():
         "time": "08:00",
         "days": ["mon", "tue", "wed", "thu", "fri"],
         "wake_screen": True,
+        "blank_screen": False,
         "open_browser": True,
         "return_to_home": True,
     }

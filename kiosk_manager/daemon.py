@@ -204,6 +204,10 @@ class Daemon:
             result = self.browser.ensure_open(
                 return_to_home=entry.get("return_to_home", True))
             actions.append(result)
+        if entry.get("blank_screen", False):
+            # Last, so a combined entry still ends with the screen off.
+            actions.append("blanked screen" if screen.blank_now()
+                           else "blank failed")
         self.note("scheduled %s -> %s" % (entry.get("time"), ", ".join(actions)))
 
     # ---- settings window -----------------------------------------------

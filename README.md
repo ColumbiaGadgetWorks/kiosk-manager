@@ -75,7 +75,7 @@ The settings window has five tabs.
   often it checks, the page title that marks the right page, and how long it
   leaves the screen alone after someone uses the desktop.
 * **Schedule**: the list of wake / open events. Each event has a time, a set of
-  weekdays, and switches for waking the screen, opening the page, and returning
+  weekdays, and switches for waking or blanking the screen, opening the page, and returning
   an already open page to the home URL.
 * **Screen**: blank after N minutes, power the panel off after N minutes
   (0 means never for both), disable the lock screen, plus buttons to wake,
