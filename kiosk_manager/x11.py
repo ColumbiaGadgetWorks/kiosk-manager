@@ -21,12 +21,18 @@ def _has(cmd):
 def _run(args, timeout=10):
     try:
         proc = subprocess.run(args, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, timeout=timeout,
+                              stderr=subprocess.PIPE, timeout=timeout,
                               check=False)
-        return proc.returncode == 0, proc.stdout.decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError) as exc:
-        log.debug("%s failed: %s", args[0], exc)
+        log.warning("%s failed to run: %s", args[0], exc)
         return False, ""
+    out = proc.stdout.decode("utf-8", "replace")
+    if proc.returncode != 0:
+        # Non-zero is routine for xdotool searches that match nothing, so this
+        # stays at debug; the callers log the decisions that matter.
+        log.debug("%s rc=%d: %s", " ".join(args), proc.returncode,
+                  proc.stderr.decode("utf-8", "replace").strip()[:200])
+    return proc.returncode == 0, out
 
 
 def available():
@@ -102,14 +108,52 @@ def title(wid):
     return out.strip() if ok else ""
 
 
+def wm_class(wid):
+    ok, out = _run(["xprop", "-id", str(wid), "WM_CLASS"])
+    if not ok or "=" not in out:
+        return ""
+    return out.split("=", 1)[1].strip().replace('"', "")
+
+
+def window_pid(wid):
+    ok, out = _run(["xprop", "-id", str(wid), "_NET_WM_PID"])
+    if not ok or "=" not in out:
+        return ""
+    return out.split("=", 1)[1].strip()
+
+
+def inventory():
+    """Every managed window with the details the watchdog reasons about."""
+    found = []
+    for wid in stacking():
+        found.append({
+            "id": wid,
+            "hex": hex(wid),
+            "title": title(wid),
+            "class": wm_class(wid),
+            "pid": window_pid(wid),
+            "state": sorted(state(wid)),
+            "type": sorted(window_types(wid)),
+        })
+    return found
+
+
 def activate(wid):
-    """Un-minimise, raise and focus a window."""
-    _run(["xdotool", "windowactivate", "--sync", str(wid)], timeout=5)
-    _run(["xdotool", "windowraise", str(wid)])
+    """Un-minimise, raise and focus a window. True when it reached the top.
+
+    Both commands are attempted even when the first reports success: under a
+    compositor that denies activation, xdotool still exits 0 while nothing
+    moves, so the caller checks the stack afterwards rather than the exit code.
+    """
+    act_ok, _ = _run(["xdotool", "windowactivate", "--sync", str(wid)], timeout=5)
+    raise_ok, _ = _run(["xdotool", "windowraise", str(wid)])
+    log.debug("activate %s: windowactivate=%s windowraise=%s", wid, act_ok, raise_ok)
+    return act_ok or raise_ok
 
 
 def minimize(wid):
     ok, _ = _run(["xdotool", "windowminimize", str(wid)])
+    log.debug("minimize %s: %s", wid, ok)
     return ok
 
 

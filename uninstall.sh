@@ -8,6 +8,7 @@ BIN="$PREFIX/bin/kiosk-manager"
 UNIT_DIR="$HOME/.config/systemd/user"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kiosk-manager"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kiosk-manager"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/kiosk-manager"
 
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
@@ -30,10 +31,10 @@ rm -f "$BIN"
 rm -rf "$LIB_DIR"
 
 if [ "$PURGE" = "1" ]; then
-    rm -rf "$DATA_DIR" "$CONFIG_DIR"
-    echo "Removed config and the kiosk Firefox profile too."
+    rm -rf "$DATA_DIR" "$CONFIG_DIR" "$STATE_DIR"
+    echo "Removed config, logs and the kiosk Firefox profile too."
 else
-    echo "Kept $CONFIG_DIR and $DATA_DIR (pass --purge to delete them)."
+    echo "Kept $CONFIG_DIR, $DATA_DIR and $STATE_DIR (pass --purge to delete them)."
 fi
 
 echo "kiosk-manager removed."

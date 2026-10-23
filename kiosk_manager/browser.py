@@ -9,9 +9,16 @@ import signal
 import subprocess
 import time
 
-from . import config, procs, x11
+from . import config, procs, screen, x11
 
 log = logging.getLogger("kiosk.browser")
+
+# Printed whenever a raise silently fails on Wayland, where the compositor and
+# not this program decides what is on top.
+WAYLAND_RAISE_HINT = (
+    "this is a Wayland session: xdotool can only move XWayland windows and "
+    "GNOME ignores activation from other processes. Run "
+    "`kiosk-manager diagnose` for the full picture")
 
 # Unique marker baked into the command line so we can find the kiosk instance
 # even if it was started by a previous run of the daemon.
@@ -257,34 +264,72 @@ class BrowserManager:
         self.proc = None
         return stopped
 
+    def window_debug(self):
+        """Why the window layer can or cannot act, in one line."""
+        return ("display=%r wayland=%s x11_layer=%s xdotool=%s xprop=%s "
+                "running=%s pids=%s windows=%s"
+                % (os.environ.get("DISPLAY", ""), screen.is_wayland(),
+                   x11.available(), _has("xdotool"), _has("xprop"),
+                   self.is_running(), self._find_pids(), self.windows()))
+
     def raise_window(self):
+        """Bring the kiosk page to the front. True only if it got there.
+
+        The return value used to be "we ran the command"; it is now "the page
+        is actually on top", because under Wayland the commands succeed while
+        the compositor quietly ignores them.
+        """
         wid = self.window_id()
         if not wid:
+            log.warning("raise: no kiosk window to raise (%s)", self.window_debug())
             return False
+        before = x11.top_app_window()
         x11.activate(wid)
-        return True
+        time.sleep(0.3)
+        after = x11.top_app_window()
+        if after is not None and after == int(wid):
+            log.info("raise: kiosk window %s is on top (was %s)", wid,
+                     hex(before) if before else "none")
+            return True
+        log.warning("raise: window %s did not come forward; top is %s %r. %s",
+                    wid, hex(after) if after else "unreadable",
+                    x11.title(after)[:40] if after else "",
+                    WAYLAND_RAISE_HINT if screen.is_wayland()
+                    else "check the window manager")
+        log.debug("raise context: %s", self.window_debug())
+        return False
 
     def minimize(self):
         """Drop the kiosk window to reveal the settings window behind it."""
         wid = self.window_id()
-        return bool(wid) and x11.minimize(wid)
+        if not wid:
+            log.warning("minimize: no kiosk window found (%s)", self.window_debug())
+            return False
+        ok = x11.minimize(wid)
+        log.info("minimize: window %s -> %s", wid, "minimised" if ok else "refused")
+        return ok
 
     def return_to_home(self):
         """Send Alt+Home so an idle kiosk goes back to the configured URL."""
         wid = self.window_id()
         if not wid or not _has("xdotool"):
+            log.warning("return to home: skipped (window=%s xdotool=%s)",
+                        wid, _has("xdotool"))
             return False
         _run(["xdotool", "windowactivate", "--sync", wid])
-        _run(["xdotool", "key", "--clearmodifiers", "--window", wid, "alt+Home"])
-        return True
+        ok, _ = _run(["xdotool", "key", "--clearmodifiers", "--window", wid,
+                      "alt+Home"])
+        log.info("return to home: sent alt+Home to window %s (%s)", wid,
+                 "accepted" if ok else "rejected")
+        return ok
 
     def ensure_open(self, return_to_home=True):
         """Open the kiosk page, or just raise it when it is already up."""
         if self.is_running():
-            self.raise_window()
+            raised = self.raise_window()
             if return_to_home:
                 self.return_to_home()
-            return "raised"
+            return "raised" if raised else "already running, but could not raise it"
         ok, msg = self.launch()
         return "launched" if ok else "failed: %s" % msg
 

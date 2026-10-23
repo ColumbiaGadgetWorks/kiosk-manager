@@ -14,9 +14,14 @@ CONFIG_DIR = os.path.join(
 DATA_DIR = os.path.join(
     os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), APP
 )
+STATE_DIR = os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), APP
+)
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 PROFILE_DIR = os.path.join(DATA_DIR, "firefox-profile")
-LOG_PATH = os.path.join(DATA_DIR, "kiosk-manager.log")
+# Logs belong in the state directory, not alongside the Firefox profile.
+LOG_DIR = os.path.join(STATE_DIR, "logs")
+LOG_PATH = os.path.join(LOG_DIR, "daemon.log")
 
 
 def runtime_dir():
@@ -102,6 +107,13 @@ DEFAULTS = {
         # After someone presses Minimize or uses the settings window, the
         # watchdog leaves the screen alone for this long.
         "operator_grace_minutes": 10,
+    },
+    "logging": {
+        # Debug logging records every window decision: what was asked for,
+        # which backend ran, and what was actually on screen afterwards.
+        "debug": False,
+        "max_bytes": 1000000,
+        "keep_files": 3,
     },
     "update": {
         "enabled": False,

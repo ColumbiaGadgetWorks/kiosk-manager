@@ -179,13 +179,63 @@ kiosk-manager update-check   # ask GitHub whether a newer build exists
 kiosk-manager update         # install it now (restarts the service only)
 ```
 
-Service control and logs:
+Service control:
 
 ```bash
 systemctl --user status kiosk-manager.service
 systemctl --user restart kiosk-manager.service
 journalctl --user -u kiosk-manager.service -f
 ```
+
+## Logs and diagnostics
+
+Logs are in `~/.local/state/kiosk-manager/logs`, the XDG state directory, one
+file per component, rotated at 1 MB with three kept:
+
+| File | What writes it |
+|---|---|
+| `daemon.log` | the background service: boot, schedule, watchdog, windows |
+| `gui.log` | the settings window |
+| `cli.log` | one-off commands |
+
+The daemon still writes everything to stderr as well, so `journalctl --user -u
+kiosk-manager.service` is unchanged.
+
+```bash
+kiosk-manager logs              # tail daemon.log
+kiosk-manager logs gui -n 50    # tail another component
+kiosk-manager logs -p           # print the file path
+kiosk-manager debug on          # record every window decision, then: off
+kiosk-manager diagnose          # write a full report and print its path
+kiosk-manager diagnose --print  # same report, straight to the terminal
+```
+
+`diagnose` is the one to send when a window does not appear. It records the
+session type and display variables, which tools are installed, every window the
+X layer can see with its class, title, state and stacking position, the running
+browser and settings-window processes with the display environment each one
+inherited, the service and scope state, the daemon status, the config, and the
+tail of every log. The **Troubleshooting** section of the System tab has the
+same thing behind a **Save diagnostics report** button, plus the debug switch,
+for when there is no keyboard on the kiosk.
+
+### Windows that will not come forward
+
+Raising a window is a request to the window manager, not a command, and the
+logs now say whether it was honoured rather than whether the command ran.
+A line like
+
+```
+raise: window 12582914 did not come forward; top is 0x2200003 'Kiosk Manager'
+```
+
+means the page is running and was asked to come up, and something else stayed
+on top. Under Wayland that is expected in two cases: `xdotool` can only see and
+move XWayland clients, and GNOME ignores activation requests from other
+processes. The settings window is a native Wayland client when the session is
+Wayland, so it does not appear in the X window list at all. `kiosk-manager
+diagnose` prints the session type and each process's backend at the top of the
+report, which is the fastest way to tell these apart.
 
 ## Configuration file
 

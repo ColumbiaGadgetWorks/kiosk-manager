@@ -445,6 +445,28 @@ class KioskWindow(Gtk.Window):
         box.add(self._hint("An update restarts only the background service. The "
                            "kiosk page stays on screen; this window reopens on "
                            "the new version by itself."))
+
+        box.add(self._title("Troubleshooting"))
+        self.debug_switch = self._switch_row(
+            box, "Debug logging: record every window decision",
+            self.cfg.get("logging", {}).get("debug", False))
+        box.add(self._hint("Logs are in %s. Debug applies to the service as "
+                           "soon as you save, and to this window when it next "
+                           "starts." % config.LOG_DIR))
+
+        self.diag_label = Gtk.Label(xalign=0)
+        self.diag_label.set_selectable(True)
+        self.diag_label.set_line_wrap(True)
+        box.add(self.diag_label)
+
+        diag_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.diag_button = Gtk.Button(label="Save diagnostics report")
+        self.diag_button.connect("clicked", self._on_diagnose)
+        diag_row.pack_start(self.diag_button, True, True, 0)
+        box.add(diag_row)
+        box.add(self._hint("The report covers the session type, every window on "
+                           "screen, the running processes and the recent logs. "
+                           "Same as running kiosk-manager diagnose."))
         return box
 
     def _page_status(self):
@@ -628,6 +650,7 @@ class KioskWindow(Gtk.Window):
             "expected_title": self.title_entry.get_text().strip(),
             "operator_grace_minutes": int(self.grace_spin.get_value()),
         })
+        cfg.setdefault("logging", {})["debug"] = self.debug_switch.get_active()
         cfg.setdefault("update", {}).update(self._collect_update())
         return cfg
 
@@ -667,6 +690,7 @@ class KioskWindow(Gtk.Window):
         self.dpms_spin.set_value(scfg.get("dpms_off_after_minutes", 0))
         self.lock_switch.set_active(scfg.get("disable_lock", True))
         self.keep_gui_switch.set_active(gcfg.get("keep_running", True))
+        self.debug_switch.set_active(cfg.get("logging", {}).get("debug", False))
         wcfg = cfg.get("watchdog", {})
         self.watchdog_switch.set_active(wcfg.get("enabled", True))
         self.watchdog_spin.set_value(wcfg.get("interval_minutes", 5))
@@ -709,6 +733,30 @@ class KioskWindow(Gtk.Window):
     def _set_update_buttons(self, sensitive):
         self.check_button.set_sensitive(sensitive)
         self.update_button.set_sensitive(sensitive)
+
+    def _on_diagnose(self, *_args):
+        """Ask the daemon for a report; fall back to building one here."""
+        self.diag_button.set_sensitive(False)
+        self._flash("Collecting diagnostics...", ok=True)
+
+        def done(reply):
+            self.diag_button.set_sensitive(True)
+            if reply.get("ok") and reply.get("path"):
+                self.diag_label.set_text("Report saved:\n%s" % reply["path"])
+                self._flash("Diagnostics saved", ok=True)
+                return
+            try:
+                from . import diagnose
+                path = diagnose.write_report()
+            except Exception as exc:
+                self.diag_label.set_text("Could not write a report: %s" % exc)
+                self._flash("Diagnostics failed", ok=False)
+                return
+            self.diag_label.set_text(
+                "Report saved (daemon not reachable):\n%s" % path)
+            self._flash("Diagnostics saved", ok=True)
+
+        self._call_async("diagnose", done, timeout=60)
 
     def _on_check_update(self, *_args):
         self._set_update_buttons(False)
@@ -836,6 +884,8 @@ class KioskWindow(Gtk.Window):
         self.set_focus_on_map(True)
         self.deiconify()
         self.present()
+        log.info("settings window: presented (visible=%s backend=%s)",
+                 self.is_visible(), display_backend())
         return False
 
     def restore_window(self):
@@ -844,7 +894,30 @@ class KioskWindow(Gtk.Window):
         self.deiconify()
         self.unmaximize()
         self.show()
+        log.info("settings window: restored without focus (visible=%s)",
+                 self.is_visible())
         return False
+
+
+def display_backend():
+    """"X11" or "Wayland": which stack this window actually talks to.
+
+    This is the single most useful fact when a window will not come forward,
+    because a Wayland window cannot be raised by xdotool at all.
+    """
+    try:
+        from gi.repository import Gdk
+        display = Gdk.Display.get_default()
+        if display is None:
+            return "none"
+        name = type(display).__name__
+        if "Wayland" in name:
+            return "Wayland"
+        if "X11" in name:
+            return "X11"
+        return name
+    except Exception as exc:  # never let a diagnostic break the window
+        return "unknown (%s)" % exc
 
 
 def _hand_over(show):
@@ -864,6 +937,10 @@ def main(show=False):
     # pinging the socket, which a copy that is still starting cannot answer.
     if not instance.acquire("gui"):
         return _hand_over(show)
+
+    log.info("settings window starting: backend=%s display=%r wayland=%r logs=%s",
+             display_backend(), os.environ.get("DISPLAY", ""),
+             os.environ.get("WAYLAND_DISPLAY", ""), config.LOG_DIR)
 
     # The socket goes up before the window is built, so the daemon can see
     # this copy from the first moment and never starts another.

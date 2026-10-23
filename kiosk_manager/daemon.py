@@ -9,8 +9,8 @@ import subprocess
 import threading
 import time
 
-from . import (browser, config, instance, ipc, procs, scheduler, screen, updater,
-               version, x11)
+from . import (browser, config, diagnose, instance, ipc, logs, procs, scheduler,
+               screen, updater, version, x11)
 
 log = logging.getLogger("kiosk.daemon")
 
@@ -102,6 +102,10 @@ class Daemon:
                       instance.holder("daemon"))
             raise SystemExit(1)
         log.info("kiosk-manager %s starting", version.describe())
+        # The display stack decides whether windows can be steered at all, so
+        # record it once per start rather than guessing from later failures.
+        log.info("environment: %s", diagnose.environment_summary())
+        log.info("logs: %s", config.LOG_DIR)
         self.server = ipc.Server(config.daemon_socket(), self.handle)
         self.server.start()
         log.info("ipc listening on %s", config.daemon_socket())
@@ -511,6 +515,7 @@ class Daemon:
     def reload_config(self):
         with self.lock:
             self.cfg = config.load()
+            logs.apply_level(self.cfg.get("logging", {}).get("debug"))
             self.browser.update_config(self.cfg)
             self.apply_screen()
             self.sync_browser_url()
@@ -521,6 +526,7 @@ class Daemon:
         with self.lock:
             config.save(new_cfg)
             self.cfg = config.load()
+            logs.apply_level(self.cfg.get("logging", {}).get("debug"))
             self.browser.update_config(self.cfg)
             self.apply_screen()
             self.sync_browser_url()
@@ -642,6 +648,21 @@ class Daemon:
         if command == "quit":
             self._stop.set()
             return {"ok": True}
+        if command == "diagnose":
+            # Built here so the report carries the daemon's own view of the
+            # session, which is the one that matters for window trouble.
+            try:
+                path = diagnose.write_report()
+            except OSError as exc:
+                return {"ok": False, "error": "could not write the report: %s" % exc}
+            self.note("diagnostics written to %s" % path)
+            return {"ok": True, "path": path, "log_dir": config.LOG_DIR}
+        if command == "logs":
+            component = (request or {}).get("component", "daemon")
+            if component not in logs.COMPONENTS:
+                return {"ok": False, "error": "no such log: %s" % component}
+            return {"ok": True, "component": component,
+                    "text": logs.tail(component, int((request or {}).get("lines", 200)))}
         return {"ok": False, "error": "unknown command: %s" % command}
 
 

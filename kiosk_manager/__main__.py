@@ -2,12 +2,10 @@
 
 import argparse
 import json
-import logging
-import os
 import subprocess
 import sys
 
-from . import config, ipc, procs, version
+from . import config, ipc, logs, procs, version
 
 COMMANDS = {
     "status": "status",
@@ -30,16 +28,8 @@ SLOW_COMMANDS = {"update_check": 120, "update_now": 600, "restart_browser": 30,
                  "minimize_browser": 10}
 
 
-def setup_logging(verbose=False, to_file=False):
-    handlers = [logging.StreamHandler(sys.stderr)]
-    if to_file:
-        os.makedirs(config.DATA_DIR, exist_ok=True)
-        handlers.append(logging.FileHandler(config.LOG_PATH))
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        handlers=handlers,
-    )
+def setup_logging(component, verbose=False, to_file=True):
+    return logs.setup(component, verbose=verbose, to_file=to_file)
 
 
 def daemon_call(command, **kwargs):
@@ -108,19 +98,64 @@ def main(argv=None):
     set_url_parser.add_argument("url")
     sub.add_parser("config-path", help="print the config file location")
     sub.add_parser("version", help="print the installed version")
+    diag_parser = sub.add_parser(
+        "diagnose", help="write a full report of the session, windows and logs")
+    diag_parser.add_argument("--print", dest="to_stdout", action="store_true",
+                             help="print the report instead of saving it")
+    diag_parser.add_argument("--log-lines", type=int, default=120,
+                             help="log lines to include (default 120)")
+    logs_parser = sub.add_parser("logs", help="print the tail of a log file")
+    logs_parser.add_argument("component", nargs="?", default="daemon",
+                             choices=logs.COMPONENTS)
+    logs_parser.add_argument("-n", "--lines", type=int, default=200)
+    logs_parser.add_argument("-p", "--path", action="store_true",
+                             help="print the log file path and exit")
+    debug_parser = sub.add_parser(
+        "debug", help="turn debug logging on or off and reload the daemon")
+    debug_parser.add_argument("state", choices=("on", "off"))
 
     args = parser.parse_args(argv)
     cmd = args.cmd or "gui"
 
     if cmd == "daemon":
-        setup_logging(args.verbose, to_file=True)
+        setup_logging("daemon", args.verbose)
         from . import daemon
         return daemon.main()
 
     if cmd == "gui":
-        setup_logging(args.verbose)
+        setup_logging("gui", args.verbose)
         from . import gui
         return gui.main(show=args.show or args.no_minimize)
+
+    if cmd == "diagnose":
+        setup_logging("cli", args.verbose, to_file=False)
+        from . import diagnose
+        if args.to_stdout:
+            print(diagnose.report(args.log_lines))
+            return 0
+        path = diagnose.write_report(log_lines=args.log_lines)
+        print("wrote %s" % path)
+        print("send that file, or read it with:  less %s" % path)
+        return 0
+
+    if cmd == "logs":
+        if args.path:
+            print(logs.log_path(args.component))
+            return 0
+        sys.stdout.write(logs.tail(args.component, args.lines))
+        return 0
+
+    if cmd == "debug":
+        want = args.state == "on"
+        cfg = config.load()
+        cfg.setdefault("logging", {})["debug"] = want
+        config.save(cfg)
+        reply = daemon_call("reload")
+        print("debug logging %s (daemon: %s)"
+              % (args.state, "reloaded" if reply.get("ok")
+                 else reply.get("error", "not running")))
+        print("the settings window picks this up when it next starts")
+        return 0
 
     if cmd == "show":
         if args.url:
