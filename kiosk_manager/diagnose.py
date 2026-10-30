@@ -182,6 +182,19 @@ def report(log_lines=120):
         out.append("drift from config: %s" % (screen.drift(config.load()) or "none"))
     except Exception as exc:
         out.append("drift check failed: %s" % exc)
+    try:
+        out.append("keeping the screen awake: %s"
+                   % (", ".join(screen.idle_inhibitors()) or "nothing"))
+        for schema, key in (("org.gnome.desktop.session", "idle-delay"),
+                            ("org.gnome.desktop.screensaver", "idle-activation-enabled"),
+                            ("org.gnome.desktop.screensaver", "lock-enabled"),
+                            ("org.gnome.settings-daemon.plugins.power", "idle-dim"),
+                            ("org.gnome.settings-daemon.plugins.power", "sleep-inactive-ac-type")):
+            value = screen._gsettings_get(schema, key)
+            if value is not None:
+                out.append("%s %s: %s" % (schema, key, value))
+    except Exception as exc:
+        out.append("screen settings check failed: %s" % exc)
 
     out.append(_section("Config"))
     out.append(json.dumps(config.load(), indent=2, default=str))

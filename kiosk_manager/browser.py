@@ -50,6 +50,7 @@ user_pref("browser.download.useDownloadDir", true);
 user_pref("network.protocol-handler.external.kioskmgr", true);
 user_pref("network.protocol-handler.warn-external.kioskmgr", false);
 user_pref("network.protocol-handler.expose.kioskmgr", false);
+user_pref("dom.screenwakelock.enabled", false);
 """
 
 # The kiosk page links to kioskmgr://show to raise the settings window. The
