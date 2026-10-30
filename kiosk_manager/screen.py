@@ -74,7 +74,71 @@ def _screensaver(active):
 
 def is_x11():
     # An X display is usable whenever DISPLAY is set and xset can talk to it.
+    # Under Wayland that display is XWayland, not the real screen: use
+    # x11_session() to decide whether xset timeouts mean anything.
     return bool(os.environ.get("DISPLAY")) and _has("xset")
+
+
+def x11_session():
+    """True when the X server is the real display, so xset controls the panel."""
+    return is_x11() and not is_wayland()
+
+
+def _gsettings_get(schema, key):
+    """A gsettings value as a string, or None when the schema is not there."""
+    if not _has("gsettings"):
+        return None
+    ok, out = _run(["gsettings", "get", schema, key], timeout=5)
+    return out.strip() if ok else None
+
+
+# A GVariant string as gdbus prints it: 'single' quotes, or "double" when the
+# text itself contains a single quote.
+_GV_STR = r"""('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")"""
+
+
+def _gv(text):
+    return text[1:-1] if text else ""
+
+
+def idle_inhibitors():
+    """Programs currently asking the desktop not to blank, as "app (reason)".
+
+    GNOME's session manager and logind both keep a list. A video, a web page
+    holding a wake lock, or a stray `xset s off` under XWayland all show up
+    here, and any one of them keeps the screen on indefinitely.
+    """
+    found = []
+    if _has("gdbus"):
+        ok, out = _run(["gdbus", "call", "--session", "--dest", "org.gnome.SessionManager",
+                        "--object-path", "/org/gnome/SessionManager",
+                        "--method", "org.gnome.SessionManager.GetInhibitors"], timeout=5)
+        for path in re.findall(r"'(/org/gnome/SessionManager/Inhibitor\d+)'", out if ok else ""):
+            def ask(method):
+                _, reply = _run(["gdbus", "call", "--session",
+                                 "--dest", "org.gnome.SessionManager",
+                                 "--object-path", path,
+                                 "--method", "org.gnome.SessionManager.Inhibitor." + method],
+                                timeout=5)
+                return reply
+            flags = re.search(r"uint32 (\d+)", ask("GetFlags"))
+            if not flags or not int(flags.group(1)) & 8:  # 8 = inhibit idle
+                continue
+            app = re.search(_GV_STR, ask("GetAppId"))
+            reason = re.search(_GV_STR, ask("GetReason"))
+            found.append("%s (%s)" % (_gv(app.group(1)) if app else "?",
+                                      (_gv(reason.group(1)) if reason else "") or "no reason given"))
+    if _has("gdbus"):
+        # logind's own list; one tuple per lock, fields kept separate.
+        ok, out = _run(["gdbus", "call", "--system", "--dest", "org.freedesktop.login1",
+                        "--object-path", "/org/freedesktop/login1",
+                        "--method", "org.freedesktop.login1.Manager.ListInhibitors"], timeout=5)
+        tuple_re = r"\(\s*" + r",\s*".join([_GV_STR] * 4)
+        for what, who, why, mode in re.findall(tuple_re, out if ok else ""):
+            what, who, why, mode = map(_gv, (what, who, why, mode))
+            if "idle" in what.split(":") and mode == "block":
+                found.append("%s (%s)" % (who, why or "no reason given"))
+    return found
 
 
 def _gsettings(schema, key, value):
@@ -106,7 +170,7 @@ def apply_settings(cfg):
     idle_s = min([t for t in (blank_s, dpms_s) if t > 0] or [0])
     notes = []
 
-    if is_x11():
+    if x11_session():
         if blank_s <= 0:
             _run(["xset", "s", "off"])
             _run(["xset", "s", "noblank"])
@@ -118,6 +182,14 @@ def apply_settings(cfg):
             _run(["xset", "+dpms"])
             _run(["xset", "dpms", "0", "0", str(dpms_s)])
         notes.append("xset")
+    elif is_x11():
+        # Wayland: DISPLAY is XWayland, so xset cannot reach the panel, and
+        # `xset s off` there can turn into an idle inhibitor that stops GNOME
+        # from ever blanking. Put XWayland's screensaver back to its default
+        # (which also clears one an older build left behind) and leave the
+        # timeouts to the compositor's settings below.
+        _run(["xset", "s", "default"])
+        notes.append("xwayland-reset")
 
     # GNOME / Cinnamon / MATE style session settings. Missing schemas just fail.
     _gsettings("org.gnome.desktop.session", "idle-delay", "uint32 %d" % idle_s)
@@ -158,13 +230,24 @@ def drift(cfg):
     Returns a short description, or "" when everything matches.
     """
     screen = cfg.get("screen", {})
-    if not screen.get("manage_timeout", True) or not is_x11():
-        return ""
-    ok, out = _run(["xset", "q"], timeout=5)
-    if not ok:
+    if not screen.get("manage_timeout", True):
         return ""
     blank_s, dpms_s = _timeouts(cfg)
     problems = []
+
+    # GNOME (X11 or Wayland) blanks on its own timer; read it back directly.
+    idle_s = min([t for t in (blank_s, dpms_s) if t > 0] or [0])
+    current = _gsettings_get("org.gnome.desktop.session", "idle-delay")
+    if current is not None:
+        found = re.search(r"(\d+)\s*$", current)  # "uint32 600" -> 600
+        if found and int(found.group(1)) != idle_s:
+            problems.append("GNOME blank delay %ss, want %ss" % (found.group(1), idle_s))
+
+    if not x11_session():
+        return "; ".join(problems)
+    ok, out = _run(["xset", "q"], timeout=5)
+    if not ok:
+        return "; ".join(problems)
     timeout = re.search(r"timeout:\s*(\d+)", out)
     if timeout and int(timeout.group(1)) != blank_s:
         problems.append("blank after %ss, want %ss" % (timeout.group(1), blank_s))
@@ -245,8 +328,15 @@ def probe_display():
 
 def current_state():
     """Best-effort read-back of what the session is actually doing."""
-    info = {"session_type": session_type(), "display": os.environ.get("DISPLAY", "")}
-    if is_x11():
+    info = {"session_type": "wayland" if is_wayland() else session_type(),
+            "display": os.environ.get("DISPLAY", "")}
+    delay = _gsettings_get("org.gnome.desktop.session", "idle-delay")
+    if delay is not None:
+        info["gnome_idle_delay"] = delay
+    inhibitors = idle_inhibitors()
+    if inhibitors:
+        info["kept_awake_by"] = inhibitors
+    if x11_session():
         ok, out = _run(["xset", "q"])
         if ok:
             for line in out.splitlines():

@@ -834,6 +834,9 @@ class KioskWindow(Gtk.Window):
                                           screen_info.get("display") or "unset"),
             "Screensaver: %s" % (screen_info.get("x_screensaver") or "n/a"),
             "DPMS: %s" % (screen_info.get("dpms") or "n/a"),
+            "GNOME blank delay: %s" % (screen_info.get("gnome_idle_delay") or "n/a"),
+            "Keeping the screen awake: %s" % (", ".join(screen_info.get("kept_awake_by") or [])
+                                              or "nothing"),
             "Last action: %s" % daemon_info.get("last_event", ""),
         ]
         self.status_label.set_text("\n".join(lines))

@@ -28,6 +28,10 @@ BOOT_WINDOW_SECONDS = 600
 # before the watchdog judges the title.
 PAGE_LOAD_SECONDS = 90
 
+# Re-apply drifted screen settings at most this often. A desktop that keeps
+# putting its own values back is reported instead of fought every check.
+SCREEN_REAPPLY_SECONDS = 30 * 60
+
 # A settings window that holds its lock but has not answered for this long is
 # hung: it is stopped so a working one can start.
 GUI_HUNG_SECONDS = 120
@@ -61,6 +65,7 @@ class Daemon:
         self.gui_backoff = GUI_RETRY_MIN
         self.gui_restarted_for = None
         self.gui_silent_since = 0.0
+        self.screen_reapplied_at = 0.0
         self.watchdog_next = time.time() + 60
         self.watchdog_result = "not run yet"
         self.watchdog_at = 0.0
@@ -397,9 +402,17 @@ class Daemon:
             time.sleep(1.0)
 
         drifted = screen.drift(self.cfg)
-        if drifted:
+        if drifted and time.time() - self.screen_reapplied_at > SCREEN_REAPPLY_SECONDS:
             self.apply_screen()
+            self.screen_reapplied_at = time.time()
             actions.append("screen settings had changed (%s), re-applied" % drifted)
+        elif drifted:
+            actions.append("screen settings keep changing (%s); something on the "
+                           "desktop is overriding them" % drifted)
+        awake = screen.idle_inhibitors()
+        if awake:
+            # Reported, not fought: these belong to other programs.
+            actions.append("screen kept awake by %s" % ", ".join(awake))
 
         gui_reply, gui_win = self.gui_window()
         if not touch_gui:

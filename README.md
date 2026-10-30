@@ -365,10 +365,23 @@ folder the installer created if you want to go back.
 
 ## Notes and limitations
 
-* Screen control assumes an X11 session (`DISPLAY=:0`), which is what the
-  existing unit used. Under a Wayland session the gsettings path still applies
-  timeouts and `gdbus` still wakes the screen, but `xdotool` window raising and
-  Alt+Home will not work.
+* X11 is the best-supported session. Under Wayland (GNOME's default on
+  Debian), `DISPLAY=:0` is XWayland rather than the real screen, so:
+  * blank and power-off timeouts come only from GNOME's settings
+    (`org.gnome.desktop.session idle-delay`, set to the first of the two
+    configured times). `xset` is not used for them: `xset s off` on XWayland
+    can hold an idle inhibitor that keeps GNOME from ever blanking, so the
+    service resets XWayland's screensaver to its default instead;
+  * blank and wake go through Mutter's D-Bus power control;
+  * `xdotool` can only see and raise XWayland windows, and GNOME may refuse
+    activations, so stacking fixes and Alt+Home are best-effort.
+
+  To switch the kiosk to X11 on GNOME, pick "GNOME on Xorg" at the login
+  screen, or set `WaylandEnable=false` in `/etc/gdm3/daemon.conf` and reboot.
+* Anything that asks the desktop to stay awake (a video, a page wake lock)
+  keeps the screen on however short the timeouts. The watchdog and the Status
+  tab list them under "Keeping the screen awake", and the kiosk Firefox
+  profile turns the Screen Wake Lock API off.
 * The dedicated Firefox profile lives in
   `~/.local/share/kiosk-manager/firefox-profile`. Its `user.js` is rewritten on
   every launch, so put lasting tweaks in the GUI or the config file rather than
