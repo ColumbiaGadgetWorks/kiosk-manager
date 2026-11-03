@@ -19,6 +19,10 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
+# Without these GNOME lists the window as "python3".
+GLib.set_prgname("kiosk-manager")
+GLib.set_application_name("Kiosk Manager")
+
 from . import config, instance, ipc, scheduler, version  # noqa: E402
 
 log = logging.getLogger("kiosk.gui")

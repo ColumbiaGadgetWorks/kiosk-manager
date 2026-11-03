@@ -10,6 +10,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 
 log = logging.getLogger("kiosk.screen")
 
@@ -60,6 +62,52 @@ def _mutter_power(mode):
                   "org.gnome.Mutter.DisplayConfig", "PowerSaveMode",
                   "<int32 %d>" % mode])
     return ok
+
+
+def _idle_ms():
+    """Milliseconds since the last keyboard/mouse/touch input, or None."""
+    if not _has("gdbus"):
+        return None
+    ok, out = _run(["gdbus", "call", "--session",
+                    "--dest", "org.gnome.Mutter.IdleMonitor",
+                    "--object-path", "/org/gnome/Mutter/IdleMonitor/Core",
+                    "--method", "org.gnome.Mutter.IdleMonitor.GetIdletime"],
+                   timeout=3)
+    found = re.search(r"uint64 (\d+)", out) if ok else None
+    return int(found.group(1)) if found else None
+
+
+_watch_stop = threading.Event()
+
+
+def _stop_input_watch():
+    _watch_stop.set()
+
+
+def _watch_input_to_wake(max_seconds=12 * 3600):
+    """Turn the panel back on at the next touch, key or mouse move.
+
+    Setting Mutter's PowerSaveMode from outside leaves GNOME unaware that the
+    panel is off, so it does not wake on input by itself. Watch the input idle
+    time and undo the blank when it resets.
+    """
+    _watch_stop.set()           # retire any watcher from an earlier blank
+    stop = threading.Event()
+    globals()["_watch_stop"] = stop
+
+    def run():
+        started = time.time()
+        time.sleep(2.0)         # let the click that blanked the screen settle
+        while not stop.is_set() and time.time() - started < max_seconds:
+            idle = _idle_ms()
+            if idle is not None and idle < 1500:
+                log.info("input while blanked, waking the panel")
+                _mutter_power(0)
+                _screensaver(False)
+                return
+            stop.wait(0.5)
+
+    threading.Thread(target=run, name="wake-on-input", daemon=True).start()
 
 
 def _screensaver(active):
@@ -270,6 +318,7 @@ def drift(cfg):
 def wake():
     """Bring the panel back on and reset the idle timer."""
     done = []
+    _stop_input_watch()
     if is_wayland():
         # xset only reaches XWayland there, not the real panel.
         if _mutter_power(0):
@@ -303,7 +352,10 @@ def blank_now():
     if is_wayland():
         # Power the panel off through Mutter; if that is refused, fall back to
         # the shell's black screen.
-        return _mutter_power(1) or _screensaver(True)
+        if _mutter_power(1):
+            _watch_input_to_wake()
+            return True
+        return _screensaver(True)
     if is_x11():
         # "force off" is ignored while DPMS is disabled, which is the default
         # (never power off), so switch it on first. The timeouts stay as set.
