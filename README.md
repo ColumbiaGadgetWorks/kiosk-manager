@@ -232,8 +232,9 @@ raise: window 12582914 did not come forward; top is 0x2200003 'Kiosk Manager'
 means the page is running and was asked to come up, and something else stayed
 on top. Under Wayland that is expected in two cases: `xdotool` can only see and
 move XWayland clients, and GNOME ignores activation requests from other
-processes. The settings window is a native Wayland client when the session is
-Wayland, so it does not appear in the X window list at all. `kiosk-manager
+processes. The settings window runs on XWayland, like Firefox, so both appear in
+the X window list; starting it with `GDK_BACKEND=wayland` makes it a native
+Wayland window that the X window list cannot see. `kiosk-manager
 diagnose` prints the session type and each process's backend at the top of the
 report, which is the fastest way to tell these apart.
 

@@ -20,6 +20,38 @@ def under_systemd():
     return bool(os.environ.get("INVOCATION_ID")) and shutil.which("systemd-run") is not None
 
 
+# The display a program needs to reach. GNOME publishes these to the systemd
+# user manager when the session (and XWayland) starts; a service started
+# before login, or that outlived a session restart, holds stale copies.
+SESSION_VARS = ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE",
+                "XDG_CURRENT_DESKTOP", "DBUS_SESSION_BUS_ADDRESS")
+
+
+def refresh_session_env():
+    """Copy the session's display variables from the user manager into our
+    environment. Returns the names that changed."""
+    if not shutil.which("systemctl"):
+        return []
+    try:
+        proc = subprocess.run(["systemctl", "--user", "show-environment"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    changed = []
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in SESSION_VARS and value and os.environ.get(key) != value:
+            os.environ[key] = value
+            changed.append(key)
+    if changed:
+        log.info("session environment updated: %s",
+                 ", ".join("%s=%s" % (k, os.environ[k]) for k in changed))
+    return changed
+
+
 def self_command(*args):
     """Command line that runs this program again with `args`."""
     exe = os.environ.get("KIOSK_MANAGER_BIN") or shutil.which("kiosk-manager")
