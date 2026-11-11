@@ -116,8 +116,9 @@ def report(log_lines=120):
         out.append("NOTE: this is a Wayland session. The compositor, not this")
         out.append("program, decides which window is on top. xdotool can only")
         out.append("see and raise XWayland clients, and GNOME refuses most")
-        out.append("activation requests from other processes. A GTK settings")
-        out.append("window started under Wayland is invisible to xdotool.")
+        out.append("activation requests from other processes. The settings")
+        out.append("window runs on XWayland unless GDK_BACKEND says otherwise;")
+        out.append("as a native Wayland window it is invisible to xdotool.")
 
     out.append(_section("Tools"))
     for tool in TOOLS:

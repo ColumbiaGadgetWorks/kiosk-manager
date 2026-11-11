@@ -32,6 +32,9 @@ PAGE_LOAD_SECONDS = 90
 # putting its own values back is reported instead of fought every check.
 SCREEN_REAPPLY_SECONDS = 30 * 60
 
+# How often to pick up a new XAUTHORITY / DISPLAY from the session.
+SESSION_ENV_SECONDS = 60
+
 # A settings window that holds its lock but has not answered for this long is
 # hung: it is stopped so a working one can start.
 GUI_HUNG_SECONDS = 120
@@ -67,6 +70,7 @@ class Daemon:
         self.gui_silent_since = 0.0
         self.screen_reapplied_at = 0.0
         self.watchdog_next = time.time() + 60
+        self.session_env_next = 0.0
         self.watchdog_result = "not run yet"
         self.watchdog_at = 0.0
         # Until this time someone is using the desktop (pressed Minimize or
@@ -87,10 +91,12 @@ class Daemon:
 
     def wait_for_display(self, timeout=120):
         """Block until an X display answers, so Firefox does not race the WM."""
-        if not os.environ.get("DISPLAY"):
-            os.environ["DISPLAY"] = ":0"
         deadline = time.time() + timeout
         while time.time() < deadline and not self._stop.is_set():
+            # Started before login, the service has no XAUTHORITY yet.
+            procs.refresh_session_env()
+            if not os.environ.get("DISPLAY"):
+                os.environ["DISPLAY"] = ":0"
             if screen.probe_display():
                 return True
             time.sleep(2)
@@ -171,6 +177,9 @@ class Daemon:
 
     def tick(self):
         now = datetime.datetime.now()
+        if time.time() >= self.session_env_next:
+            self.session_env_next = time.time() + SESSION_ENV_SECONDS
+            procs.refresh_session_env()
         with self.lock:
             sched = self.cfg.get("schedule", {})
             if sched.get("enabled", True):
@@ -467,8 +476,11 @@ class Daemon:
         elif want_kiosk and not info["kiosk_flag"]:
             problem = "browser not started in kiosk mode"
         elif info["minimized"]:
-            self.browser.raise_window()
-            return ["restored the minimised kiosk page"]
+            if self.browser.raise_window():
+                return ["restored the minimised kiosk page"]
+            # GNOME can refuse to un-minimise a window for another process,
+            # and with no taskbar there is then no way back to the page.
+            problem = "kiosk page minimised and could not be restored"
         elif want_kiosk and not info["fullscreen"]:
             problem = "browser is not fullscreen"
         elif expected and loaded and expected.lower() not in info["title"].lower():

@@ -317,9 +317,11 @@ class BrowserManager:
             log.warning("return to home: skipped (window=%s xdotool=%s)",
                         wid, _has("xdotool"))
             return False
-        _run(["xdotool", "windowactivate", "--sync", wid])
-        ok, _ = _run(["xdotool", "key", "--clearmodifiers", "--window", wid,
-                      "alt+Home"])
+        if not self.raise_window():
+            log.warning("return to home: page is not focused, keys not sent")
+            return False
+        # No --window: that sends synthetic events, which Firefox ignores.
+        ok, _ = _run(["xdotool", "key", "--clearmodifiers", "alt+Home"])
         log.info("return to home: sent alt+Home to window %s (%s)", wid,
                  "accepted" if ok else "rejected")
         return ok

@@ -16,6 +16,13 @@ import time
 
 import gi
 
+# Firefox runs on XWayland so xdotool can find and raise it. Put this window
+# there too: a native Wayland window is invisible to the X stacking order, so
+# the daemon cannot tell when it covers the page, and GNOME refuses to raise
+# it. Must be set before Gtk is imported. GDK_BACKEND=wayland still overrides.
+if os.environ.get("DISPLAY"):
+    os.environ.setdefault("GDK_BACKEND", "x11")
+
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
