@@ -10,7 +10,7 @@ import threading
 import time
 
 from . import (browser, config, diagnose, instance, ipc, logs, procs, scheduler,
-               screen, updater, version, x11)
+               screen, session, updater, version, x11)
 
 log = logging.getLogger("kiosk.daemon")
 
@@ -654,6 +654,16 @@ class Daemon:
             return {"ok": True, "backends": screen.wake()}
         if command == "blank":
             return {"ok": screen.blank_now()}
+        if command == "session_info":
+            return session.info()
+        if command == "set_session":
+            ok, message = session.set_next(request.get("target"))
+            self.note("desktop session: %s" % message)
+            return {"ok": ok, "result": message, "error": None if ok else message}
+        if command == "reboot":
+            self.note("restart requested from the settings window")
+            ok, message = session.reboot()
+            return {"ok": ok, "result": message, "error": None if ok else message}
         if command == "apply_screen":
             return {"ok": True, "backend": self.apply_screen()}
         # Update commands run in the IPC thread, outside the daemon lock, so a

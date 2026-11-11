@@ -83,7 +83,9 @@ The settings window has five tabs.
 * **System**: whether the service keeps this window running (starts it at
   boot and reopens it if it closes), and the
   automatic update switch, time, days, repository and branch, with
-  **Check for updates** and **Update now** buttons.
+  **Check for updates** and **Update now** buttons. **Desktop session** shows
+  whether the kiosk runs X11 or Wayland and switches the session used from the
+  next start, with a **Restart computer now** button.
 * **Status**: what the daemon and browser are doing, the last watchdog result,
   the next scheduled event, and buttons to open, restart or close the browser.
 
@@ -177,6 +179,9 @@ kiosk-manager config-path    # print the config file location
 kiosk-manager version        # print the installed version and commit
 kiosk-manager update-check   # ask GitHub whether a newer build exists
 kiosk-manager update         # install it now (restarts the service only)
+kiosk-manager session        # X11 or Wayland now, and at the next start
+kiosk-manager session x11    # use X11 from the next start (or: wayland)
+kiosk-manager session reboot # restart the computer
 ```
 
 Service control:
@@ -377,8 +382,11 @@ folder the installer created if you want to go back.
   * `xdotool` can only see and raise XWayland windows, and GNOME may refuse
     activations, so stacking fixes and Alt+Home are best-effort.
 
-  To switch the kiosk to X11 on GNOME, pick "GNOME on Xorg" at the login
-  screen, or set `WaylandEnable=false` in `/etc/gdm3/daemon.conf` and reboot.
+  To switch the kiosk to X11, use **Desktop session** on the System tab (or
+  `kiosk-manager session x11`) and restart. It saves "GNOME on Xorg" as the
+  kiosk user's session in AccountsService, which needs no password; GDM uses
+  it at the next login. `WaylandEnable=false` in `/etc/gdm3/daemon.conf` also
+  works, but then switching back to Wayland needs that line removed.
 * Anything that asks the desktop to stay awake (a video, a page wake lock)
   keeps the screen on however short the timeouts. The watchdog and the Status
   tab list them under "Keeping the screen awake", and the kiosk Firefox
@@ -388,6 +396,9 @@ folder the installer created if you want to go back.
   every launch, so put lasting tweaks in the GUI or the config file rather than
   there. Turn off "Use the dedicated kiosk Firefox profile" to use the default
   profile instead.
+* Tests: `python3 -m unittest discover -s tests -t .` (no display needed).
+  GitHub runs them on every push, and the auto-updater runs them on the
+  fetched build and refuses to install one that fails or does not compile.
 * Verified: Python syntax, the scheduler, the settings window keeper logic,
   the watchdog decisions against stubbed window state, the updater against a
   local git repository, and the CLI wiring. Not verified: the GTK window,

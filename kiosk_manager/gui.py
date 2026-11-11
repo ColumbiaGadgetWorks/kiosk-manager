@@ -457,6 +457,25 @@ class KioskWindow(Gtk.Window):
                            "kiosk page stays on screen; this window reopens on "
                            "the new version by itself."))
 
+        box.add(self._title("Desktop session"))
+        self.session_label = Gtk.Label(label="Checking...", xalign=0)
+        self.session_label.set_line_wrap(True)
+        box.add(self.session_label)
+        session_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.session_button = Gtk.Button(label="Switch session")
+        self.session_button.set_sensitive(False)
+        self.session_button.connect("clicked", self._on_switch_session)
+        self.reboot_button = Gtk.Button(label="Restart computer now")
+        self.reboot_button.connect("clicked", self._on_reboot)
+        session_row.pack_start(self.session_button, True, True, 0)
+        session_row.pack_start(self.reboot_button, True, True, 0)
+        box.add(session_row)
+        box.add(self._hint("X11 is recommended: under Wayland GNOME ignores most "
+                           "requests to raise, restore or stack the kiosk page. "
+                           "The change applies after a restart."))
+        self.session_target = None
+        GLib.idle_add(self._refresh_session)
+
         box.add(self._title("Troubleshooting"))
         self.debug_switch = self._switch_row(
             box, "Debug logging: record every window decision",
@@ -740,6 +759,57 @@ class KioskWindow(Gtk.Window):
         # instead of restoring or restacking it on the way.
         self._call_async("open", done, timeout=60, return_to_home=False,
                          ensure_kiosk=True, from_gui=True)
+
+    # ---- desktop session ---------------------------------------------
+    def _refresh_session(self):
+        def done(reply):
+            if not reply.get("ok"):
+                self.session_label.set_text("Session: unknown (%s)"
+                                            % reply.get("error", "daemon not running"))
+                return
+            name = {"x11": "X11", "wayland": "Wayland"}
+            text = "Running now: %s.  Next start: %s." % (
+                name.get(reply.get("current"), "?"), name.get(reply.get("next"), "?"))
+            if reply.get("problems"):
+                text += "\n" + "; ".join(reply["problems"])
+            self.session_label.set_text(text)
+            self.session_target = "wayland" if reply.get("next") == "x11" else "x11"
+            self.session_button.set_label(
+                "Use %s from next start" % name[self.session_target])
+            self.session_button.set_sensitive(True)
+        self._call_async("session_info", done, timeout=30)
+        return False
+
+    def _on_switch_session(self, *_args):
+        target = self.session_target
+        if not target:
+            return
+        self.session_button.set_sensitive(False)
+
+        def done(reply):
+            if reply.get("ok"):
+                self._flash(reply.get("result"), ok=True)
+            else:
+                self._flash("Session change failed: %s" % reply.get("error", "?"),
+                            ok=False)
+            self._refresh_session()
+        self._call_async("set_session", done, timeout=30, target=target)
+
+    def _on_reboot(self, *_args):
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Restart the computer now?")
+        dialog.format_secondary_text(
+            "The kiosk page comes back by itself after the restart.")
+        answer = dialog.run()
+        dialog.destroy()
+        if answer != Gtk.ResponseType.OK:
+            return
+        self._call_async("reboot", lambda r: self._flash(
+            r.get("result") or r.get("error", "?"), ok=bool(r.get("ok"))),
+            timeout=30)
 
     def _set_update_buttons(self, sensitive):
         self.check_button.set_sensitive(sensitive)

@@ -110,6 +110,10 @@ def main(argv=None):
     logs_parser.add_argument("-n", "--lines", type=int, default=200)
     logs_parser.add_argument("-p", "--path", action="store_true",
                              help="print the log file path and exit")
+    session_parser = sub.add_parser(
+        "session", help="show or choose the X11 / Wayland session for the next login")
+    session_parser.add_argument("target", nargs="?",
+                                choices=("x11", "wayland", "reboot"))
     debug_parser = sub.add_parser(
         "debug", help="turn debug logging on or off and reload the daemon")
     debug_parser.add_argument("state", choices=("on", "off"))
@@ -144,6 +148,19 @@ def main(argv=None):
             return 0
         sys.stdout.write(logs.tail(args.component, args.lines))
         return 0
+
+    if cmd == "session":
+        setup_logging("cli", args.verbose, to_file=False)
+        from . import session
+        if args.target == "reboot":
+            ok, message = session.reboot()
+        elif args.target:
+            ok, message = session.set_next(args.target)
+        else:
+            print(json.dumps(session.info(), indent=2))
+            return 0
+        print(message)
+        return 0 if ok else 1
 
     if cmd == "debug":
         want = args.state == "on"

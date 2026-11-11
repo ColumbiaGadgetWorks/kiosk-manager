@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -25,6 +26,39 @@ LOG_PATH = os.path.join(config.DATA_DIR, "update.log")
 
 # An install that has not restarted the daemon within this long has failed.
 PENDING_TIMEOUT = 15 * 60
+
+
+def verify_source(src):
+    """Refuse a fetched build that does not compile or fails its own tests.
+
+    The kiosk installs straight from the branch, so this is the last check
+    between a broken push and a kiosk that stops working overnight.
+    Returns (ok, message).
+    """
+    package = os.path.join(src, "kiosk_manager")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-c",
+             "import compileall, sys; "
+             "sys.exit(0 if compileall.compile_dir(sys.argv[1], quiet=1) else 1)",
+             package],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
+            check=False)
+        if proc.returncode != 0:
+            return False, "does not compile: %s" % proc.stdout.decode(
+                "utf-8", "replace").strip()[-300:]
+        if os.path.isdir(os.path.join(src, "tests")):
+            proc = subprocess.run(
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests",
+                 "-t", "."],
+                cwd=src, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=300, check=False)
+            if proc.returncode != 0:
+                return False, "tests failed: %s" % proc.stdout.decode(
+                    "utf-8", "replace").strip()[-300:]
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "could not check it: %s" % exc
+    return True, "checks passed"
 
 
 def _git(args, cwd=None, timeout=120):
@@ -142,6 +176,9 @@ class Updater:
             if not available:
                 return True, "already up to date"
             head = self._fetch(ucfg)
+            ok, message = verify_source(SRC_DIR)
+            if not ok:
+                raise RuntimeError("not installing %s: %s" % (head[:7], message))
             script = os.path.join(SRC_DIR, "install.sh")
             if not os.path.isfile(script):
                 raise RuntimeError("install.sh is missing from %s" % SRC_DIR)
