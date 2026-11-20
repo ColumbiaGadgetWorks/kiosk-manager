@@ -963,13 +963,48 @@ class KioskWindow(Gtk.Window):
         self._on_show_kiosk()
         return True
 
-    def present_window(self):
+    def present_window(self, startup_id=None):
+        """Bring the window to the front and focus it.
+
+        A request from the already-running copy carries no user timestamp, so
+        GNOME treats it as focus stealing and shows a '"Kiosk Manager" is
+        ready' notice instead. Two things get past that: the launch's own
+        startup id (passed over from the copy the launcher started), which
+        tells Mutter this follows a real tap, and an EWMH activation from
+        xdotool, which Mutter honours like a taskbar click.
+        """
         self.last_active = time.time()
         self.set_focus_on_map(True)
+        if startup_id:
+            try:
+                self.set_startup_id(startup_id)
+            except Exception as exc:  # an odd id must never stop the window
+                log.debug("set_startup_id(%r) failed: %s", startup_id, exc)
         self.deiconify()
         self.present()
-        log.info("settings window: presented (visible=%s backend=%s)",
-                 self.is_visible(), display_backend())
+        log.info("settings window: presented (visible=%s backend=%s startup_id=%s)",
+                 self.is_visible(), display_backend(), bool(startup_id))
+        GLib.timeout_add(400, self._ensure_front)
+        return False
+
+    def _ensure_front(self):
+        """If the compositor declined present(), activate the window directly."""
+        if self.is_active():
+            return False
+        gdk_window = self.get_window()
+        xid = getattr(gdk_window, "get_xid", None) if gdk_window else None
+        if xid is None or not shutil.which("xdotool"):
+            log.info("settings window: not focused and cannot force it (backend=%s)",
+                     display_backend())
+            return False
+        wid = xid()
+        log.info("settings window: present() was declined, activating %s directly", wid)
+        # xdotool --sync can wait seconds; keep it off the GTK main loop.
+        threading.Thread(
+            target=lambda: subprocess.run(
+                ["xdotool", "windowactivate", str(wid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5),
+            daemon=True).start()
         return False
 
     def restore_window(self):
@@ -1007,9 +1042,14 @@ def display_backend():
 def _hand_over(show):
     """Another copy holds the lock: pass a show request to it and exit."""
     if show:
+        # The launcher (GNOME Shell) gave this process the id of the tap that
+        # started it. Hand it over so the running copy may take focus with it.
+        startup_id = (os.environ.get("DESKTOP_STARTUP_ID")
+                      or os.environ.get("XDG_ACTIVATION_TOKEN") or "")
+        request = {"command": "show", "startup_id": startup_id}
         # It may still be starting up; give it a few seconds to answer.
         for _ in range(10):
-            if ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0).get("ok"):
+            if ipc.send(config.gui_socket(), request, timeout=2.0).get("ok"):
                 break
             time.sleep(1.0)
     log.info("settings window already running (pid %s)", instance.holder("gui"))
@@ -1044,7 +1084,8 @@ def main(show=False):
             if window is None:
                 state["show"] = True
             else:
-                on_window(lambda w: w.present_window())
+                startup_id = (request or {}).get("startup_id") or None
+                on_window(lambda w: w.present_window(startup_id))
             return {"ok": True}
         if command == "idle":
             if window is not None:

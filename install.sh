@@ -146,7 +146,7 @@ LAUNCHER
 chmod +x "$BIN"
 echo "launcher: $BIN"
 
-sed "s|Exec=kiosk-manager gui|Exec=$BIN gui|" \
+sed "s|Exec=kiosk-manager show|Exec=$BIN show|" \
     "$SRC_DIR/desktop/kiosk-manager.desktop" > "$APPS_DIR/kiosk-manager.desktop"
 # The service starts the settings window itself now ("Keep this window
 # running" on the System tab), so drop the login autostart entry that
@@ -163,6 +163,7 @@ Type=Application
 Name=Kiosk Manager link handler
 Comment=Opens kioskmgr:// links from the kiosk page
 Exec=$BIN handle-url %u
+StartupNotify=true
 NoDisplay=true
 Terminal=false
 MimeType=x-scheme-handler/kioskmgr;

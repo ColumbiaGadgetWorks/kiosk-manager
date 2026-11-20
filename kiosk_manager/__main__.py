@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 
@@ -41,7 +42,13 @@ def daemon_call(command, **kwargs):
 
 def cmd_show():
     """Raise the config window, starting it if it is not already up."""
-    reply = ipc.send(config.gui_socket(), {"command": "show"}, timeout=2.0)
+    # Pass along the launch's startup id (from the menu or from Firefox's link
+    # handler) so the running window may take focus instead of GNOME showing a
+    # '"Kiosk Manager" is ready' notice.
+    startup_id = (os.environ.get("DESKTOP_STARTUP_ID")
+                  or os.environ.get("XDG_ACTIVATION_TOKEN") or "")
+    reply = ipc.send(config.gui_socket(),
+                     {"command": "show", "startup_id": startup_id}, timeout=2.0)
     if reply.get("ok"):
         return 0
     subprocess.Popen(procs.self_command("gui", "--show"),
